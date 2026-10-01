@@ -40,6 +40,69 @@ let customers = [
   { id: 'cust-6', name: 'Ravi Sharma', phone: '+91 98222 33445', address: 'Malad East', balance: 1400, lastTransactionDate: '2024-06-14', status: 'due', createdAt: '2024-05-12' },
 ];
 
+let products = [
+  { id: 'prod-0', name: 'Biscuit', category: 'Grocery & Snacks', stockQty: 40, lowStockThreshold: 10, buyPrice: 40, sellPrice: 50, unit: 'packet', sku: 'SNK-BIS-01' },
+  { id: 'prod-1', name: 'Classmate Deluxe Notebook 240p', category: 'Stationery', stockQty: 85, lowStockThreshold: 20, buyPrice: 65, sellPrice: 90, unit: 'pcs', sku: 'STA-NOTE-01' },
+  { id: 'prod-2', name: 'Reynolds Ballpoint Pen Blue (Pack of 10)', category: 'Stationery', stockQty: 40, lowStockThreshold: 15, buyPrice: 70, sellPrice: 100, unit: 'pack', sku: 'STA-PEN-02' },
+  { id: 'prod-3', name: 'Asian Paints Apex Emulsion 4L White', category: 'Paints', stockQty: 8, lowStockThreshold: 10, buyPrice: 1450, sellPrice: 1850, unit: 'can', sku: 'PNT-APX-04' },
+  { id: 'prod-4', name: 'Professional Paint Roller 9-inch', category: 'Tools', stockQty: 5, lowStockThreshold: 8, buyPrice: 160, sellPrice: 240, unit: 'pcs', sku: 'TLS-ROL-09' },
+  { id: 'prod-5', name: 'Birla White WallCare Putty 20kg', category: 'Building Materials', stockQty: 18, lowStockThreshold: 10, buyPrice: 720, sellPrice: 890, unit: 'bag', sku: 'BLD-PUT-20' },
+  { id: 'prod-6', name: 'Rust-Oleum Anti-Rust Primer Spray 400ml', category: 'Paints', stockQty: 3, lowStockThreshold: 6, buyPrice: 380, sellPrice: 520, unit: 'can', sku: 'PNT-SPR-01' },
+  { id: 'prod-7', name: 'Fevicol SH Synthetic Adhesive 1kg', category: 'Hardware', stockQty: 24, lowStockThreshold: 10, buyPrice: 220, sellPrice: 280, unit: 'jar', sku: 'HDW-FEV-01' },
+];
+
+let invoices = [
+  {
+    id: 'inv-1001',
+    invoiceNumber: '#INV-1001',
+    customerName: 'Walk-In Customer',
+    date: '2024-06-18',
+    items: [
+      { id: 'item-1', name: 'Classmate Deluxe Notebook 240p', qty: 3, price: 90, total: 270 },
+      { id: 'item-2', name: 'Reynolds Ballpoint Pen Blue (Pack of 10)', qty: 2, price: 100, total: 200 }
+    ],
+    subtotal: 470,
+    discountPercent: 10,
+    discountAmount: 47,
+    taxPercent: 18,
+    taxAmount: 76.14,
+    grandTotal: 499.14,
+    paidAmount: 499.14,
+    dueAmount: 0,
+    paymentMode: 'Cash',
+    paymentStatus: 'Paid',
+    notes: 'Paid at counter',
+  },
+  {
+    id: 'inv-1002',
+    invoiceNumber: '#INV-1002',
+    customerName: 'Rahul Sharma',
+    customerId: 'cust-1',
+    customerPhone: '+91 98201 12345',
+    date: '2024-06-18',
+    items: [
+      { id: 'item-3', name: 'Asian Paints Apex Emulsion 4L White', qty: 2, price: 1850, total: 3700 },
+      { id: 'item-4', name: 'Professional Paint Roller 9-inch', qty: 2, price: 240, total: 480 }
+    ],
+    subtotal: 4180,
+    discountPercent: 5,
+    discountAmount: 209,
+    taxPercent: 18,
+    taxAmount: 714.78,
+    grandTotal: 4685.78,
+    paidAmount: 4685.78,
+    dueAmount: 0,
+    paymentMode: 'UPI',
+    paymentStatus: 'Paid',
+    notes: 'Delivery to Andheri East site',
+  },
+];
+
+let stockMovements = [
+  { id: 'sm-1', productId: 'prod-1', productName: 'Classmate Deluxe Notebook 240p', changeQty: -3, reason: 'SALE', referenceId: '#INV-1001', date: '2024-06-18', finalQty: 85 },
+  { id: 'sm-2', productId: 'prod-2', productName: 'Reynolds Ballpoint Pen Blue (Pack of 10)', changeQty: -2, reason: 'SALE', referenceId: '#INV-1001', date: '2024-06-18', finalQty: 40 },
+];
+
 let transactions = [
   { id: 'tx-1', date: '2024-06-18 10:15', type: 'in', category: 'Sale', description: 'Cash sale (Stationery)', partyName: 'Walk-In Customer', paymentMode: 'Cash', amount: 500 },
   { id: 'tx-2', date: '2024-06-18 09:40', type: 'in', category: 'Sale', description: 'Paint & Roller invoice', partyName: 'Rahul Sharma', paymentMode: 'UPI', amount: 4685 },
@@ -180,6 +243,247 @@ app.put('/api/reminders/:id', (req, res) => {
 app.delete('/api/reminders/:id', (req, res) => {
   reminders = reminders.filter(r => r.id !== req.params.id);
   res.json({ success: true });
+});
+
+// Products & Inventory
+app.get('/api/products', (req, res) => {
+  res.json({ products });
+});
+
+app.post('/api/products', (req, res) => {
+  const { name, category, stockQty, lowStockThreshold, buyPrice, sellPrice, unit, sku } = req.body;
+  const newProd = {
+    id: `prod-${Date.now()}`,
+    name: name || 'New Item',
+    category: category || 'General',
+    stockQty: Number(stockQty) || 0,
+    lowStockThreshold: Number(lowStockThreshold) || 10,
+    buyPrice: Number(buyPrice) || 0,
+    sellPrice: Number(sellPrice) || 0,
+    unit: unit || 'pcs',
+    sku: sku || `SKU-${Date.now().toString().slice(-4)}`,
+  };
+  products.unshift(newProd);
+  res.json({ product: newProd });
+});
+
+app.put('/api/products/:id', (req, res) => {
+  const idx = products.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Product not found' });
+  products[idx] = { ...products[idx], ...req.body };
+  res.json({ product: products[idx] });
+});
+
+app.delete('/api/products/:id', (req, res) => {
+  products = products.filter(p => p.id !== req.params.id);
+  res.json({ success: true });
+});
+
+// Stock Movements & Adjustments
+app.get('/api/stock-movements', (req, res) => {
+  res.json({ stockMovements });
+});
+
+app.post('/api/stock/adjust', (req, res) => {
+  const { productId, productName, newQty, deltaQty, reason, referenceId } = req.body;
+  const p = products.find(prod => (productId && prod.id === productId) || (productName && prod.name.toLowerCase().includes(productName.toLowerCase().trim())));
+  if (!p) {
+    return res.status(404).json({ error: 'Product not found' });
+  }
+
+  const previousQty = p.stockQty;
+  let finalQty = p.stockQty;
+  let changeQty = 0;
+
+  if (newQty !== undefined) {
+    finalQty = Math.max(0, Number(newQty));
+    changeQty = finalQty - previousQty;
+  } else if (deltaQty !== undefined) {
+    finalQty = Math.max(0, previousQty + Number(deltaQty));
+    changeQty = Number(deltaQty);
+  }
+
+  p.stockQty = finalQty;
+  const movement = {
+    id: `sm-${Date.now()}`,
+    productId: p.id,
+    productName: p.name,
+    changeQty,
+    reason: reason || 'ADJUSTMENT',
+    referenceId: referenceId || `Stock adjusted from ${previousQty} to ${finalQty}`,
+    date: new Date().toISOString().slice(0, 10),
+    finalQty,
+  };
+  stockMovements.unshift(movement);
+
+  res.json({ product: p, movement });
+});
+
+// Invoices
+app.get('/api/invoices', (req, res) => {
+  res.json({ invoices });
+});
+
+// ATOMIC BUSINESS TRANSACTION PIPELINE: Sale Creation
+app.post('/api/sales/create', (req, res) => {
+  const { customerName, items, paidAmount, paymentMethod, discountPercent, notes } = req.body;
+  if (!customerName || !items || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'Customer name and at least one item are required' });
+  }
+
+  // 1. Resolve or create customer
+  let cust = customers.find(c => c.name.toLowerCase() === customerName.toLowerCase().trim());
+  if (!cust) {
+    cust = {
+      id: `cust-${Date.now()}`,
+      name: customerName.trim(),
+      phone: '+91 98000 00000',
+      address: '',
+      balance: 0,
+      lastTransactionDate: new Date().toISOString().slice(0, 10),
+      status: 'settled',
+      createdAt: new Date().toISOString().slice(0, 10),
+    };
+    customers.unshift(cust);
+  }
+
+  // 2. Validate products and decrease stock atomically
+  const movements: any[] = [];
+  const updatedProds: any[] = [];
+  const billItems: any[] = [];
+
+  for (const it of items) {
+    const p = products.find(prod => (it.productId && prod.id === it.productId) || prod.name.toLowerCase().includes(it.name.toLowerCase().trim()));
+    const price = it.price || (p ? p.sellPrice : 50);
+    const itemTotal = price * it.qty;
+
+    billItems.push({
+      id: `item-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: p ? p.name : it.name,
+      qty: it.qty,
+      price,
+      total: itemTotal,
+      productId: p?.id,
+    });
+
+    if (p) {
+      p.stockQty = Math.max(0, p.stockQty - it.qty);
+      updatedProds.push(p);
+
+      const sm = {
+        id: `sm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        productId: p.id,
+        productName: p.name,
+        changeQty: -it.qty,
+        reason: 'SALE',
+        referenceId: `Sale to ${cust.name}`,
+        date: new Date().toISOString().slice(0, 10),
+        finalQty: p.stockQty,
+      };
+      stockMovements.unshift(sm);
+      movements.push(sm);
+    }
+  }
+
+  // 3. Compute Invoice amounts
+  const subtotal = billItems.reduce((s, i) => s + i.total, 0);
+  const discPercent = Number(discountPercent) || 0;
+  const discAmount = (subtotal * discPercent) / 100;
+  const grandTotal = Math.round((subtotal - discAmount) * 100) / 100;
+
+  const mode = paymentMethod || 'Cash';
+  const paid = paidAmount !== undefined ? Number(paidAmount) : (mode === 'Credit' ? 0 : grandTotal);
+  const due = Math.max(0, grandTotal - paid);
+
+  const newInvoice = {
+    id: `inv-${Date.now()}`,
+    invoiceNumber: `#INV-${1000 + invoices.length + 1}`,
+    customerName: cust.name,
+    customerId: cust.id,
+    date: new Date().toISOString().slice(0, 10),
+    items: billItems,
+    subtotal,
+    discountPercent: discPercent,
+    discountAmount: discAmount,
+    taxPercent: 0,
+    taxAmount: 0,
+    grandTotal,
+    paidAmount: paid,
+    dueAmount: due,
+    paymentMode: mode,
+    paymentStatus: paid === 0 ? 'Due' : due > 0 ? 'Partial' : 'Paid',
+    notes: notes || `Sale of ${billItems.length} item(s)`,
+  };
+  invoices.unshift(newInvoice);
+
+  // 4. Update customer outstanding balance: increases by dueAmount
+  if (due > 0) {
+    cust.balance += due;
+    cust.status = cust.balance > 0 ? 'due' : 'settled';
+    cust.lastTransactionDate = new Date().toISOString().slice(0, 10);
+  }
+
+  // 5. Create real financial transaction ONLY for actual money received
+  let newTx: any = null;
+  if (paid > 0) {
+    newTx = {
+      id: `tx-${Date.now()}`,
+      date: new Date().toLocaleString('en-IN', { hour12: false }),
+      type: 'in',
+      direction: 'INCOME',
+      category: 'Sale',
+      description: `Payment received for ${newInvoice.invoiceNumber}`,
+      partyName: cust.name,
+      paymentMode: mode,
+      amount: paid,
+      invoiceId: newInvoice.id,
+      customerId: cust.id,
+    };
+    transactions.unshift(newTx);
+  }
+
+  res.json({
+    invoice: newInvoice,
+    transaction: newTx,
+    customer: cust,
+    updatedProducts: updatedProds,
+    stockMovements: movements,
+  });
+});
+
+app.post('/api/invoices/:id/cancel', (req, res) => {
+  const inv = invoices.find(i => i.id === req.params.id);
+  if (!inv) return res.status(404).json({ error: 'Invoice not found' });
+  inv.paymentStatus = 'Cancelled';
+
+  // Restore product stock
+  for (const item of inv.items) {
+    const p = products.find(prod => (item.productId && prod.id === item.productId) || prod.name === item.name);
+    if (p) {
+      p.stockQty += item.qty;
+      stockMovements.unshift({
+        id: `sm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        productId: p.id,
+        productName: p.name,
+        changeQty: item.qty,
+        reason: 'RETURN',
+        referenceId: `Cancellation of ${inv.invoiceNumber}`,
+        date: new Date().toISOString().slice(0, 10),
+        finalQty: p.stockQty,
+      });
+    }
+  }
+
+  // Reverse customer balance if due amount was outstanding
+  if (inv.dueAmount && inv.dueAmount > 0) {
+    const cust = customers.find(c => c.name.toLowerCase() === inv.customerName.toLowerCase());
+    if (cust) {
+      cust.balance = Math.max(0, cust.balance - inv.dueAmount);
+      cust.status = cust.balance > 0 ? 'due' : 'settled';
+    }
+  }
+
+  res.json({ success: true, invoice: inv });
 });
 
 // Summary / Reports

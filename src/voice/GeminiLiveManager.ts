@@ -429,6 +429,101 @@ export class GeminiLiveManager {
           args.speech_response
         );
         return res.responseText;
+      // 8. BILLING & SALE CREATION
+      if (name === 'create_sale') {
+        const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name || 'Walk-In Customer';
+        const res = await this.actionRouter.createSale({
+          customerName: custName,
+          productName: args.product_name || args.item_name || 'Item',
+          quantity: args.quantity ? Number(args.quantity) : 1,
+          unitPrice: args.unit_price ? Number(args.unit_price) : undefined,
+          totalAmount: args.total_amount ? Number(args.total_amount) : undefined,
+          paidAmount: args.paid_amount !== undefined ? Number(args.paid_amount) : undefined,
+          paymentMethod: args.payment_method || 'Cash',
+          notes: args.notes,
+          lang: userLang,
+        });
+        this.contextManager.setActiveCustomer(res.customer);
+        return args.speech_response || res.responseText;
+      }
+
+      // 9. RECORD PAYMENT (UPI, Cash, Card, Bank Transfer)
+      if (name === 'record_payment') {
+        const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name || 'Customer';
+        const res = await this.actionRouter.recordPayment({
+          customerNameOrId: custName,
+          amount: Number(args.amount) || 0,
+          paymentMethod: args.payment_method || 'UPI',
+          direction: args.direction || 'INCOME',
+          description: args.description,
+          lang: userLang,
+        });
+        if (res.customer) {
+          this.contextManager.setActiveCustomer(res.customer);
+        }
+        return args.speech_response || res.responseText;
+      }
+
+      // 10. MANAGE STOCK (Stock In / Purchase, Stock Out, Adjustment, Get)
+      if (name === 'manage_stock') {
+        const res = await this.actionRouter.manageStock({
+          action: args.action || 'adjust',
+          productName: args.product_name,
+          quantity: Number(args.quantity) || 0,
+          paymentMethod: args.payment_method,
+          paidAmount: args.paid_amount ? Number(args.paid_amount) : undefined,
+          lang: userLang,
+        });
+        return args.speech_response || res.responseText;
+      }
+
+      if (name === 'get_stock') {
+        const res = await this.actionRouter.manageStock({
+          action: 'get',
+          productName: args.product_name,
+          lang: userLang,
+        });
+        return args.speech_response || res.responseText;
+      }
+
+      // 11. INVOICES
+      if (name === 'get_invoice' || name === 'show_invoice') {
+        const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
+        const res = await this.actionRouter.getInvoices({
+          customerName: custName,
+          invoiceId: args.invoice_id,
+          lang: userLang,
+        });
+        return args.speech_response || res.responseText;
+      }
+
+      if (name === 'cancel_invoice') {
+        const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
+        const res = await this.actionRouter.cancelInvoice({
+          customerName: custName,
+          invoiceId: args.invoice_id,
+          lang: userLang,
+        });
+        return args.speech_response || res.responseText;
+      }
+
+      if (name === 'update_bill') {
+        const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name || 'Customer';
+        const res = await this.actionRouter.updateBill({
+          customerName: custName,
+          newAmount: Number(args.new_amount || args.amount),
+          lang: userLang,
+        });
+        return args.speech_response || res.responseText;
+      }
+
+      if (name === 'get_payment_summary') {
+        const res = await this.actionRouter.getPaymentSummary({
+          paymentMethod: args.payment_method || 'All',
+          period: args.period || 'today',
+          lang: userLang,
+        });
+        return args.speech_response || res.responseText;
       }
 
       return formatLocalizedResponse(userLang, {

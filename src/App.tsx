@@ -176,18 +176,42 @@ export default function App() {
       },
       onCustomerUpdated: (cust) => {
         setCustomers((prev) => {
-          const exists = prev.some((c) => c.id === cust.id);
-          return exists ? prev.map((c) => (c.id === cust.id ? cust : c)) : [cust, ...prev];
+          const exists = prev.some((c) => c.id === cust.id || c.name.toLowerCase() === cust.name.toLowerCase());
+          const updated = exists 
+            ? prev.map((c) => (c.id === cust.id || c.name.toLowerCase() === cust.name.toLowerCase() ? cust : c))
+            : [cust, ...prev];
+          localStorage.setItem('notibook_customers', JSON.stringify(updated));
+          return updated;
         });
       },
       onTransactionAdded: (tx) => {
-        setTransactions((prev) => [tx, ...prev]);
+        setTransactions((prev) => {
+          const updated = [tx, ...prev.filter(t => t.id !== tx.id)];
+          localStorage.setItem('notibook_transactions', JSON.stringify(updated));
+          return updated;
+        });
+      },
+      onInvoiceCreated: (inv) => {
+        setInvoices((prev) => {
+          const updated = [inv, ...prev.filter(i => i.id !== inv.id)];
+          localStorage.setItem('notibook_invoices', JSON.stringify(updated));
+          return updated;
+        });
+        setViewingInvoice(inv);
+      },
+      onProductsUpdated: (prods) => {
+        setProducts(prods);
+        localStorage.setItem('notibook_products', JSON.stringify(prods));
       },
       onRefreshData: () => {
         const savedCust = localStorage.getItem('notibook_customers');
         if (savedCust) setCustomers(JSON.parse(savedCust));
         const savedTx = localStorage.getItem('notibook_transactions');
         if (savedTx) setTransactions(JSON.parse(savedTx));
+        const savedProd = localStorage.getItem('notibook_products');
+        if (savedProd) setProducts(JSON.parse(savedProd));
+        const savedInv = localStorage.getItem('notibook_invoices');
+        if (savedInv) setInvoices(JSON.parse(savedInv));
       },
     });
   }, []);
@@ -253,35 +277,67 @@ export default function App() {
     setIsPopulatedState(true);
   };
 
-  // Finalize Invoice
+  // Finalize Invoice (Atomic connection: invoice + stock deduction + real payment transaction)
   const handleFinalizeBill = (newInvoice: Invoice) => {
     setInvoices(prev => [newInvoice, ...prev]);
     setIsPopulatedState(true);
 
-    // Add corresponding ledger transaction
-    const newTx: Transaction = {
-      id: `tx-${Date.now()}`,
-      date: new Intl.DateTimeFormat('en-IN', {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-      }).format(new Date()),
-      type: 'in',
-      category: 'Sale',
-      description: `Invoice ${newInvoice.invoiceNumber} (${newInvoice.items.length} items)`,
-      partyName: newInvoice.customerName,
-      paymentMode: newInvoice.paymentMode === 'Credit' ? 'Credit' : newInvoice.paymentMode === 'UPI' ? 'UPI' : 'Cash',
-      amount: newInvoice.grandTotal,
-    };
-    setTransactions(prev => [newTx, ...prev]);
+    // Atomically decrease stock for each invoiced product
+    setProducts(prev => {
+      const updated = prev.map(p => {
+        const item = newInvoice.items.find(i => (i.productId && i.productId === p.id) || i.name.toLowerCase() === p.name.toLowerCase());
+        if (item) {
+          return { ...p, stockQty: Math.max(0, p.stockQty - item.qty) };
+        }
+        return p;
+      });
+      localStorage.setItem('notibook_products', JSON.stringify(updated));
+      return updated;
+    });
 
-    // If customer bought on credit, update customer khatabook
-    if (newInvoice.paymentMode === 'Credit') {
-      const cust = customers.find(c => c.name.toLowerCase() === newInvoice.customerName.toLowerCase());
+    const isCredit = newInvoice.paymentMode === 'Credit' || (newInvoice.paidAmount !== undefined && newInvoice.paidAmount === 0);
+    const paidAmt = newInvoice.paidAmount !== undefined ? newInvoice.paidAmount : (isCredit ? 0 : newInvoice.grandTotal);
+    const dueAmt = Math.max(0, newInvoice.grandTotal - paidAmt);
+
+    // Only record a payment transaction if money was actually received
+    if (paidAmt > 0) {
+      const newTx: Transaction = {
+        id: `tx-${Date.now()}`,
+        date: new Intl.DateTimeFormat('en-IN', {
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+        }).format(new Date()),
+        type: 'in',
+        direction: 'INCOME',
+        category: 'Sale',
+        description: `Payment received for ${newInvoice.invoiceNumber}`,
+        partyName: newInvoice.customerName,
+        paymentMode: newInvoice.paymentMode,
+        amount: paidAmt,
+        invoiceId: newInvoice.id,
+      };
+      setTransactions(prev => [newTx, ...prev]);
+    }
+
+    // If unpaid due exists, update/create customer balance
+    if (dueAmt > 0) {
+      let cust = customers.find(c => c.name.toLowerCase() === newInvoice.customerName.toLowerCase());
       if (cust) {
-        handleCustomerTx(cust.id, 'gave', newInvoice.grandTotal, `Bill ${newInvoice.invoiceNumber}`);
+        handleCustomerTx(cust.id, 'gave', dueAmt, `Bill ${newInvoice.invoiceNumber}`);
+      } else {
+        const newCust: Customer = {
+          id: `cust-${Date.now()}`,
+          name: newInvoice.customerName,
+          phone: newInvoice.customerPhone || '+91 98000 00000',
+          balance: dueAmt,
+          lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+          status: 'due',
+          createdAt: new Intl.DateTimeFormat('en-CA').format(new Date()),
+        };
+        setCustomers(prev => [newCust, ...prev]);
       }
     }
   };

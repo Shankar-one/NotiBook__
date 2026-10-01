@@ -123,6 +123,17 @@ export const sampleCustomerTransactions: Record<string, CustomerTransaction[]> =
 
 export const sampleProducts: Product[] = [
   {
+    id: 'prod-0',
+    name: 'Biscuit',
+    category: 'Grocery & Snacks',
+    stockQty: 40,
+    lowStockThreshold: 10,
+    buyPrice: 40,
+    sellPrice: 50,
+    unit: 'packet',
+    sku: 'SNK-BIS-01',
+  },
+  {
     id: 'prod-1',
     name: 'Classmate Deluxe Notebook 240p',
     category: 'Stationery',

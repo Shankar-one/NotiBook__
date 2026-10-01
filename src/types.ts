@@ -30,6 +30,8 @@ export interface BillItem {
   productId?: string;
 }
 
+export type PaymentMethod = 'Cash' | 'UPI' | 'Card' | 'Bank Transfer' | 'Cheque' | 'Credit' | 'Other';
+
 export interface Invoice {
   id: string;
   invoiceNumber: string;
@@ -44,21 +46,37 @@ export interface Invoice {
   taxPercent: number;
   taxAmount: number;
   grandTotal: number;
-  paymentMode: 'Cash' | 'UPI' | 'Credit' | 'Bank Transfer';
-  paymentStatus: 'Paid' | 'Draft' | 'Due';
+  paidAmount?: number;
+  dueAmount?: number;
+  paymentMode: PaymentMethod;
+  paymentStatus: 'Paid' | 'Draft' | 'Due' | 'Partial' | 'Cancelled';
   notes?: string;
 }
 
 export interface Transaction {
   id: string;
   date: string;
-  type: 'in' | 'out'; // in = Money In, out = Money Out
-  category: 'Sale' | 'Customer Payment' | 'Expense' | 'Supplier Payment' | 'Salary' | 'Other';
+  type: 'in' | 'out'; // in = Money In / Income, out = Money Out / Outgoing
+  category: 'Sale' | 'Customer Payment' | 'Expense' | 'Supplier Payment' | 'Salary' | 'Purchase' | 'Refund' | 'Other';
   description: string;
   partyName?: string;
-  paymentMode: 'Cash' | 'UPI' | 'Bank' | 'Credit';
+  paymentMode: PaymentMethod;
   amount: number;
   referenceId?: string;
+  customerId?: string;
+  invoiceId?: string;
+  direction?: 'INCOME' | 'OUTGOING';
+}
+
+export interface StockMovement {
+  id: string;
+  productId: string;
+  productName: string;
+  changeQty: number; // e.g. -2 for sale, +20 for purchase
+  reason: 'SALE' | 'PURCHASE' | 'ADJUSTMENT' | 'RETURN';
+  referenceId?: string; // invoiceId or description
+  date: string;
+  finalQty: number;
 }
 
 export interface Product {

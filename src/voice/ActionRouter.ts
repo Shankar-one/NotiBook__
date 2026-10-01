@@ -1,6 +1,10 @@
 import { 
   Customer, 
-  Transaction 
+  Transaction,
+  Invoice,
+  Product,
+  StockMovement,
+  PaymentMethod
 } from '../types';
 import { 
   fetchCustomers, 
@@ -15,6 +19,15 @@ import {
   deleteTransactionApi,
   updateTransactionApi
 } from '../api/transactions';
+import { 
+  createSaleApi,
+  fetchInvoices,
+  cancelInvoiceApi
+} from '../api/invoices';
+import {
+  fetchProducts,
+  adjustStockApi
+} from '../api/products';
 import { 
   fetchReminders, 
   addReminderApi, 
@@ -53,6 +66,8 @@ export interface ActionRouterCallbacks {
   onNavigate?: (target: string, options?: NavigationOptions) => void;
   onCustomerUpdated?: (customer: Customer) => void;
   onTransactionAdded?: (tx: Transaction) => void;
+  onInvoiceCreated?: (invoice: Invoice) => void;
+  onProductsUpdated?: (products: Product[]) => void;
   onRefreshData?: () => void;
 }
 
@@ -126,20 +141,32 @@ export class ActionRouter {
     } = params;
 
     let customer: Customer | null = null;
+    const isCredit = transactionType === 'credit';
+    const delta = isCredit ? -amount : amount;
+
     if (customerNameOrId) {
       customer = await getCustomerByIdOrName(customerNameOrId);
       if (!customer && customerNameOrId !== 'खाता' && customerNameOrId !== 'Customer' && customerNameOrId !== 'New Customer' && customerNameOrId.length >= 2) {
         try {
           customer = await createCustomerApi({
             name: customerNameOrId,
-            balance: 0,
+            balance: delta,
+            status: delta > 0 ? 'due' : delta < 0 ? 'advance' : 'settled',
           });
-          if (this.callbacks.onCustomerUpdated) {
-            this.callbacks.onCustomerUpdated(customer);
-          }
         } catch (e) {
           console.warn('Could not auto-create customer:', e);
         }
+      } else if (customer) {
+        const newBalance = customer.balance + delta;
+        customer = {
+          ...customer,
+          balance: newBalance,
+          status: newBalance > 0 ? 'due' : newBalance < 0 ? 'advance' : 'settled',
+          lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+        };
+        try {
+          await updateCustomerApi(customer.id, customer);
+        } catch {}
       }
     }
 
@@ -152,6 +179,9 @@ export class ActionRouter {
       description: description || (customer ? `${transactionType === 'credit' ? 'Payment from' : 'Given to'} ${customer.name}` : undefined),
     });
 
+    if (customer && this.callbacks.onCustomerUpdated) {
+      this.callbacks.onCustomerUpdated(customer);
+    }
     if (this.callbacks.onTransactionAdded) {
       this.callbacks.onTransactionAdded(tx);
     }
@@ -160,7 +190,6 @@ export class ActionRouter {
     }
 
     const name = customer ? customer.name : (customerNameOrId || 'खाता');
-    const isCredit = transactionType === 'credit';
 
     const responseText = formatLocalizedResponse(lang, {
       hindi: `हो गया। ${name} के खाते में ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'जमा (क्रेडिट)' : 'उधार (डेबिट)'} जोड़ दिए गए हैं।`,
@@ -169,6 +198,432 @@ export class ActionRouter {
     });
 
     return { transaction: tx, customer: customer || undefined, responseText };
+  }
+
+  // 3. Create Sale & Billing (Atomic pipeline: invoice, stock deduction, payment, customer khata)
+  public async createSale(params: {
+    customerName: string;
+    productName?: string;
+    quantity?: number;
+    unitPrice?: number;
+    totalAmount?: number;
+    paidAmount?: number;
+    paymentMethod?: PaymentMethod;
+    notes?: string;
+    lang?: UserLanguage;
+  }): Promise<{ invoice: Invoice; transaction?: Transaction; customer: Customer; responseText: string }> {
+    const {
+      customerName,
+      productName = 'Item',
+      quantity = 1,
+      unitPrice,
+      totalAmount,
+      paidAmount,
+      paymentMethod = 'Cash',
+      notes,
+      lang = 'hinglish',
+    } = params;
+
+    const items = [{
+      name: productName,
+      qty: quantity,
+      price: unitPrice || (totalAmount ? totalAmount / quantity : undefined),
+    }];
+
+    const result = await createSaleApi({
+      customerName,
+      items,
+      paidAmount,
+      paymentMethod,
+      notes,
+    });
+
+    if (this.callbacks.onInvoiceCreated) {
+      this.callbacks.onInvoiceCreated(result.invoice);
+    }
+    if (this.callbacks.onCustomerUpdated) {
+      this.callbacks.onCustomerUpdated(result.customer);
+    }
+    if (result.transaction && this.callbacks.onTransactionAdded) {
+      this.callbacks.onTransactionAdded(result.transaction);
+    }
+    if (result.updatedProducts && this.callbacks.onProductsUpdated) {
+      this.callbacks.onProductsUpdated(result.updatedProducts);
+    }
+    if (this.callbacks.onRefreshData) {
+      this.callbacks.onRefreshData();
+    }
+
+    const isPaidInFull = result.invoice.dueAmount === 0;
+    const isCredit = result.invoice.paymentStatus === 'Due';
+    const responseText = formatLocalizedResponse(lang, {
+      hindi: isCredit
+        ? `${result.customer.name} के नाम ₹${result.invoice.grandTotal.toLocaleString('en-IN')} का बिल उधार पर दर्ज कर दिया है। स्टॉक अपडेट हो गया है। कुल बकाया ₹${result.customer.balance.toLocaleString('en-IN')} है।`
+        : `${result.customer.name} का ₹${result.invoice.grandTotal.toLocaleString('en-IN')} का बिल बन गया है और ₹${(result.invoice.paidAmount || 0).toLocaleString('en-IN')} ${result.invoice.paymentMode} से प्राप्त हुए। ${isPaidInFull ? 'खाता चुकता है।' : `बाकी ₹${result.invoice.dueAmount?.toLocaleString('en-IN')} बकाया है।`}`,
+      hinglish: isCredit
+        ? `${result.customer.name} ke naam ₹${result.invoice.grandTotal.toLocaleString('en-IN')} ka bill udhaar par record kar diya. Stock deduct ho gaya. Total due ₹${result.customer.balance.toLocaleString('en-IN')} hai.`
+        : `${result.customer.name} ka ₹${result.invoice.grandTotal.toLocaleString('en-IN')} ka bill create ho gaya aur ₹${(result.invoice.paidAmount || 0).toLocaleString('en-IN')} ${result.invoice.paymentMode} se receive ho gaye. ${isPaidInFull ? 'Fully paid.' : `Pending due ₹${result.invoice.dueAmount?.toLocaleString('en-IN')} hai.`}`,
+      english: isCredit
+        ? `Created ₹${result.invoice.grandTotal.toLocaleString('en-IN')} credit invoice for ${result.customer.name}. Stock updated. Total due is ₹${result.customer.balance.toLocaleString('en-IN')}.`
+        : `Created ₹${result.invoice.grandTotal.toLocaleString('en-IN')} invoice for ${result.customer.name}. Received ₹${(result.invoice.paidAmount || 0).toLocaleString('en-IN')} via ${result.invoice.paymentMode}. ${isPaidInFull ? 'Paid in full.' : `Remaining due is ₹${result.invoice.dueAmount?.toLocaleString('en-IN')}.`}`,
+    });
+
+    return { ...result, responseText };
+  }
+
+  // 3b. Record Payment (UPI, Cash, Card, Bank Transfer) - Section 3, 4, 5, 6, 7
+  public async recordPayment(params: {
+    customerNameOrId: string;
+    amount: number;
+    paymentMethod?: PaymentMethod;
+    direction?: 'INCOME' | 'OUTGOING';
+    description?: string;
+    lang?: UserLanguage;
+  }): Promise<{ transaction: Transaction; customer?: Customer; responseText: string }> {
+    const {
+      customerNameOrId,
+      amount,
+      paymentMethod = 'UPI',
+      direction = 'INCOME',
+      description,
+      lang = 'hinglish',
+    } = params;
+
+    let customer: Customer | null = null;
+    const isIncome = direction === 'INCOME';
+
+    if (isIncome && customerNameOrId && customerNameOrId.toLowerCase() !== 'supplier') {
+      customer = await getCustomerByIdOrName(customerNameOrId);
+      if (!customer && customerNameOrId.length >= 2) {
+        try {
+          customer = await createCustomerApi({
+            name: customerNameOrId,
+            balance: -amount,
+            status: 'advance',
+          });
+        } catch {}
+      } else if (customer) {
+        const newBalance = customer.balance - amount;
+        customer = {
+          ...customer,
+          balance: newBalance,
+          status: newBalance > 0 ? 'due' : newBalance < 0 ? 'advance' : 'settled',
+          lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+        };
+        try {
+          await updateCustomerApi(customer.id, customer);
+        } catch {}
+      }
+    }
+
+    const partyName = customer ? customer.name : customerNameOrId;
+    const tx = await addTransactionApi({
+      customerId: customer?.id,
+      partyName,
+      amount,
+      transactionType: isIncome ? 'credit' : 'debit',
+      paymentMode: paymentMethod,
+      category: isIncome ? 'Customer Payment' : 'Supplier Payment',
+      description: description || (isIncome 
+        ? `Payment received via ${paymentMethod} from ${partyName}`
+        : `Payment sent via ${paymentMethod} to ${partyName}`
+      ),
+    });
+
+    if (customer && this.callbacks.onCustomerUpdated) {
+      this.callbacks.onCustomerUpdated(customer);
+    }
+    if (this.callbacks.onTransactionAdded) {
+      this.callbacks.onTransactionAdded(tx);
+    }
+    if (this.callbacks.onRefreshData) {
+      this.callbacks.onRefreshData();
+    }
+
+    const responseText = formatLocalizedResponse(lang, {
+      hindi: isIncome
+        ? `${partyName} से ₹${amount.toLocaleString('en-IN')} ${paymentMethod} द्वारा प्राप्त हुए।${customer ? ` नया बकाया ₹${customer.balance.toLocaleString('en-IN')} है।` : ''}`
+        : `${partyName} को ₹${amount.toLocaleString('en-IN')} ${paymentMethod} द्वारा भुगतान कर दिया गया है।`,
+      hinglish: isIncome
+        ? `${partyName} se ₹${amount.toLocaleString('en-IN')} ${paymentMethod} se receive ho gaye.${customer ? ` Current due ₹${customer.balance.toLocaleString('en-IN')} hai.` : ''}`
+        : `${partyName} ko ₹${amount.toLocaleString('en-IN')} ${paymentMethod} se payment sent kar diya.`,
+      english: isIncome
+        ? `Received ₹${amount.toLocaleString('en-IN')} from ${partyName} via ${paymentMethod}.${customer ? ` Outstanding balance is now ₹${customer.balance.toLocaleString('en-IN')}.` : ''}`
+        : `Sent ₹${amount.toLocaleString('en-IN')} payment to ${partyName} via ${paymentMethod}.`,
+    });
+
+    return { transaction: tx, customer: customer || undefined, responseText };
+  }
+
+  // 4. Manage Stock (adjust, stock_in / purchase, stock_out, get)
+  public async manageStock(params: {
+    action: 'adjust' | 'stock_in' | 'stock_out' | 'get';
+    productName: string;
+    quantity?: number;
+    paymentMethod?: PaymentMethod;
+    paidAmount?: number;
+    lang?: UserLanguage;
+  }): Promise<{ product?: Product; movement?: StockMovement; responseText: string }> {
+    const { action, productName, quantity = 0, paymentMethod, paidAmount, lang = 'hinglish' } = params;
+    const products = await fetchProducts();
+    const prod = products.find(p => p.name.toLowerCase().includes(productName.toLowerCase().trim()));
+
+    if (action === 'get') {
+      if (!prod) {
+        const notFound = formatLocalizedResponse(lang, {
+          hindi: `सामान "${productName}" स्टॉक में नहीं मिला।`,
+          hinglish: `Item "${productName}" stock me nahi mila.`,
+          english: `Item "${productName}" not found in stock.`,
+        });
+        return { responseText: notFound };
+      }
+      const responseText = formatLocalizedResponse(lang, {
+        hindi: `${prod.name} का वर्तमान स्टॉक ${prod.stockQty} ${prod.unit} है।`,
+        hinglish: `${prod.name} ka current stock ${prod.stockQty} ${prod.unit} hai.`,
+        english: `Current stock of ${prod.name} is ${prod.stockQty} ${prod.unit}.`,
+      });
+      return { product: prod, responseText };
+    }
+
+    let reason: 'SALE' | 'PURCHASE' | 'ADJUSTMENT' | 'RETURN' = 'ADJUSTMENT';
+    let newQty: number | undefined;
+    let deltaQty: number | undefined;
+
+    if (action === 'adjust') {
+      newQty = quantity;
+      reason = 'ADJUSTMENT';
+    } else if (action === 'stock_in') {
+      deltaQty = quantity;
+      reason = 'PURCHASE';
+    } else if (action === 'stock_out') {
+      deltaQty = -quantity;
+      reason = 'ADJUSTMENT';
+    }
+
+    const result = await adjustStockApi({
+      productName,
+      newQty,
+      deltaQty,
+      reason,
+      referenceId: `Voice command: ${action}`,
+    });
+
+    // If money was paid to supplier
+    if (paidAmount && paidAmount > 0) {
+      const mode = paymentMethod || 'UPI';
+      const tx = await addTransactionApi({
+        amount: paidAmount,
+        transactionType: 'debit',
+        paymentMode: mode,
+        category: 'Supplier Payment',
+        description: `Payment to supplier for ${result.product.name} stock`,
+        partyName: 'Supplier',
+      });
+      if (this.callbacks.onTransactionAdded) {
+        this.callbacks.onTransactionAdded(tx);
+      }
+    }
+
+    const updatedAll = await fetchProducts();
+    if (this.callbacks.onProductsUpdated) {
+      this.callbacks.onProductsUpdated(updatedAll);
+    }
+    if (this.callbacks.onRefreshData) {
+      this.callbacks.onRefreshData();
+    }
+
+    const responseText = formatLocalizedResponse(lang, {
+      hindi: action === 'adjust'
+        ? `${result.product.name} का स्टॉक अब ${result.product.stockQty} ${result.product.unit} कर दिया गया है।`
+        : action === 'stock_in'
+        ? `स्टॉक में ${quantity} ${result.product.unit} ${result.product.name} जोड़ दिए गए हैं। अब कुल स्टॉक ${result.product.stockQty} है।`
+        : `${result.product.name} के ${quantity} ${result.product.unit} कम कर दिए गए हैं। अब कुल स्टॉक ${result.product.stockQty} है।`,
+      hinglish: action === 'adjust'
+        ? `${result.product.name} ka stock ab ${result.product.stockQty} ${result.product.unit} set kar diya hai.`
+        : action === 'stock_in'
+        ? `Stock me ${quantity} ${result.product.unit} ${result.product.name} add kar diye hain. Total stock ab ${result.product.stockQty} hai.`
+        : `${result.product.name} ke ${quantity} ${result.product.unit} kam kar diye hain. Total stock ab ${result.product.stockQty} hai.`,
+      english: action === 'adjust'
+        ? `Stock of ${result.product.name} adjusted to ${result.product.stockQty} ${result.product.unit}.`
+        : action === 'stock_in'
+        ? `Added ${quantity} ${result.product.unit} of ${result.product.name} to stock. Total is now ${result.product.stockQty}.`
+        : `Reduced ${quantity} ${result.product.unit} from ${result.product.name}. Total stock is now ${result.product.stockQty}.`,
+    });
+
+    return { product: result.product, movement: result.movement, responseText };
+  }
+
+  // 5. Payment Summary (UPI, Cash, Card, etc. received today)
+  public async getPaymentSummary(params: {
+    paymentMethod: 'UPI' | 'Cash' | 'Card' | 'Bank Transfer' | 'All';
+    period?: 'today' | 'week' | 'month';
+    lang?: UserLanguage;
+  }): Promise<{ total: number; count: number; responseText: string }> {
+    const { paymentMethod, lang = 'hinglish' } = params;
+    const allTx = await fetchTransactions();
+
+    const matching = allTx.filter(t => {
+      const isIncome = t.type === 'in' || t.direction === 'INCOME';
+      if (!isIncome) return false;
+      const isMethod = paymentMethod === 'All' || t.paymentMode?.toLowerCase() === paymentMethod.toLowerCase();
+      if (!isMethod) return false;
+      return true;
+    });
+
+    const total = matching.reduce((sum, t) => sum + t.amount, 0);
+    const count = matching.length;
+
+    const responseText = formatLocalizedResponse(lang, {
+      hindi: paymentMethod === 'All'
+        ? `आज कुल ${count} पेमेंट से ₹${total.toLocaleString('en-IN')} प्राप्त हुए हैं।`
+        : `आज ${paymentMethod} द्वारा कुल ₹${total.toLocaleString('en-IN')} प्राप्त हुए हैं (${count} लेनदेन)।`,
+      hinglish: paymentMethod === 'All'
+        ? `Aaj total ${count} payments se ₹${total.toLocaleString('en-IN')} receive hue hain.`
+        : `Aaj ${paymentMethod} se total ₹${total.toLocaleString('en-IN')} receive hue hain (${count} transactions).`,
+      english: paymentMethod === 'All'
+        ? `Total payments received today: ₹${total.toLocaleString('en-IN')} across ${count} entries.`
+        : `Total ${paymentMethod} received today is ₹${total.toLocaleString('en-IN')} across ${count} entries.`,
+    });
+
+    return { total, count, responseText };
+  }
+
+  // 6. Get Invoices / Latest Bill
+  public async getInvoices(params: {
+    customerName?: string;
+    invoiceId?: string;
+    lang?: UserLanguage;
+  }): Promise<{ invoice?: Invoice; invoices: Invoice[]; responseText: string }> {
+    const { customerName, invoiceId, lang = 'hinglish' } = params;
+    const all = await fetchInvoices();
+    let filtered = all;
+
+    if (customerName) {
+      filtered = all.filter(i => i.customerName.toLowerCase().includes(customerName.toLowerCase().trim()));
+    }
+    if (invoiceId) {
+      filtered = all.filter(i => i.id === invoiceId || i.invoiceNumber.toLowerCase().includes(invoiceId.toLowerCase()));
+    }
+
+    const latest = filtered[0];
+    if (!latest) {
+      const responseText = formatLocalizedResponse(lang, {
+        hindi: `${customerName ? customerName + ' का ' : ''}कोई बिल नहीं मिला।`,
+        hinglish: `${customerName ? customerName + ' ka ' : ''}koi bill nahi mila.`,
+        english: `No invoice found${customerName ? ' for ' + customerName : ''}.`,
+      });
+      return { invoices: [], responseText };
+    }
+
+    if (this.callbacks.onNavigate) {
+      this.callbacks.onNavigate('invoice_modal');
+    }
+
+    const responseText = formatLocalizedResponse(lang, {
+      hindi: `${latest.customerName} का बिल ${latest.invoiceNumber} कुल ₹${latest.grandTotal.toLocaleString('en-IN')} का है (${latest.items.length} सामान)।`,
+      hinglish: `${latest.customerName} ka bill ${latest.invoiceNumber} ₹${latest.grandTotal.toLocaleString('en-IN')} ka hai (${latest.items.length} items).`,
+      english: `Invoice ${latest.invoiceNumber} for ${latest.customerName} is for ₹${latest.grandTotal.toLocaleString('en-IN')} with ${latest.items.length} items.`,
+    });
+
+    return { invoice: latest, invoices: filtered, responseText };
+  }
+
+  // 7. Cancel Invoice
+  public async cancelInvoice(params: {
+    invoiceId?: string;
+    customerName?: string;
+    lang?: UserLanguage;
+  }): Promise<{ success: boolean; responseText: string }> {
+    const { invoiceId, customerName, lang = 'hinglish' } = params;
+    const all = await fetchInvoices();
+    const target = all.find(i => 
+      (invoiceId && (i.id === invoiceId || i.invoiceNumber === invoiceId)) ||
+      (customerName && i.customerName.toLowerCase().includes(customerName.toLowerCase().trim()))
+    );
+
+    if (!target) {
+      const responseText = formatLocalizedResponse(lang, {
+        hindi: 'रद्द करने के लिए कोई बिल नहीं मिला।',
+        hinglish: 'Cancel karne ke liye koi invoice nahi mila.',
+        english: 'No invoice found to cancel.',
+      });
+      return { success: false, responseText };
+    }
+
+    await cancelInvoiceApi(target.id);
+    if (this.callbacks.onRefreshData) {
+      this.callbacks.onRefreshData();
+    }
+
+    const responseText = formatLocalizedResponse(lang, {
+      hindi: `बिल ${target.invoiceNumber} रद्द कर दिया गया है। सामान का स्टॉक और ग्राहक का हिसाब रीसेट हो गया है।`,
+      hinglish: `Bill ${target.invoiceNumber} cancel kar diya hai. Stock aur customer balance restore ho gaya.`,
+      english: `Invoice ${target.invoiceNumber} has been cancelled. Stock and customer balance restored.`,
+    });
+
+    return { success: true, responseText };
+  }
+
+  // 7b. Update Bill ("Ravi ka bill 500 ka kar do")
+  public async updateBill(params: {
+    customerName: string;
+    newAmount: number;
+    lang?: UserLanguage;
+  }): Promise<{ invoice?: Invoice; responseText: string }> {
+    const { customerName, newAmount, lang = 'hinglish' } = params;
+    const all = await fetchInvoices();
+    const target = all.find(i => i.customerName.toLowerCase().includes(customerName.toLowerCase().trim()));
+
+    if (!target) {
+      const responseText = formatLocalizedResponse(lang, {
+        hindi: `${customerName} का कोई बिल नहीं मिला।`,
+        hinglish: `${customerName} ka koi bill nahi mila.`,
+        english: `No invoice found for ${customerName}.`,
+      });
+      return { responseText };
+    }
+
+    const oldTotal = target.grandTotal;
+    target.grandTotal = newAmount;
+    target.subtotal = newAmount;
+    if (target.items.length > 0) {
+      target.items[0].price = newAmount / target.items[0].qty;
+      target.items[0].total = newAmount;
+    }
+    if (target.paymentStatus === 'Due') {
+      target.dueAmount = newAmount;
+    } else {
+      target.paidAmount = newAmount;
+    }
+
+    const savedInvoices = all.map(i => i.id === target.id ? target : i);
+    localStorage.setItem('notibook_invoices', JSON.stringify(savedInvoices));
+
+    // Update customer balance delta
+    const delta = newAmount - oldTotal;
+    const cust = await getCustomerByIdOrName(customerName);
+    if (cust && target.paymentStatus === 'Due') {
+      cust.balance += delta;
+      await updateCustomerApi(cust.id, cust);
+      if (this.callbacks.onCustomerUpdated) {
+        this.callbacks.onCustomerUpdated(cust);
+      }
+    }
+
+    if (this.callbacks.onInvoiceCreated) {
+      this.callbacks.onInvoiceCreated(target);
+    }
+    if (this.callbacks.onRefreshData) {
+      this.callbacks.onRefreshData();
+    }
+
+    const responseText = formatLocalizedResponse(lang, {
+      hindi: `${target.customerName} का बिल अपडेट करके ₹${newAmount.toLocaleString('en-IN')} का कर दिया गया है।`,
+      hinglish: `${target.customerName} ka bill update karke ₹${newAmount.toLocaleString('en-IN')} kar diya hai.`,
+      english: `Updated ${target.customerName}'s invoice to ₹${newAmount.toLocaleString('en-IN')}.`,
+    });
+
+    return { invoice: target, responseText };
   }
 
   // 3. Delete Transaction

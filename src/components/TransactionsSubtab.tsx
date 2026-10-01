@@ -27,19 +27,34 @@ export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'in' | 'out'>('all');
+  const [paymentFilter, setPaymentFilter] = useState<string>('all');
 
   const activeTransactions = isPopulatedState ? transactions : [];
 
-  // Metrics matching Image 4
+  // Metrics matching real database transactions
   const moneyIn = isPopulatedState
-    ? activeTransactions.filter(t => t.type === 'in').reduce((sum, t) => sum + t.amount, 0) || 15240
+    ? activeTransactions.filter(t => t.type === 'in').reduce((sum, t) => sum + t.amount, 0)
     : 0;
 
   const moneyOut = isPopulatedState
-    ? activeTransactions.filter(t => t.type === 'out').reduce((sum, t) => sum + t.amount, 0) || 14580
+    ? activeTransactions.filter(t => t.type === 'out').reduce((sum, t) => sum + t.amount, 0)
     : 0;
 
-  const totalEntries = isPopulatedState ? (activeTransactions.length > 0 ? activeTransactions.length : 28) : 0;
+  const totalEntries = isPopulatedState ? activeTransactions.length : 0;
+
+  // Real payment method breakdowns (Requirement 15)
+  const upiReceived = isPopulatedState
+    ? activeTransactions.filter(t => t.type === 'in' && t.paymentMode === 'UPI').reduce((s, t) => s + t.amount, 0)
+    : 0;
+  const cashReceived = isPopulatedState
+    ? activeTransactions.filter(t => t.type === 'in' && t.paymentMode === 'Cash').reduce((s, t) => s + t.amount, 0)
+    : 0;
+  const cardReceived = isPopulatedState
+    ? activeTransactions.filter(t => t.type === 'in' && t.paymentMode === 'Card').reduce((s, t) => s + t.amount, 0)
+    : 0;
+  const bankReceived = isPopulatedState
+    ? activeTransactions.filter(t => t.type === 'in' && (t.paymentMode === 'Bank' || t.paymentMode === 'Bank Transfer')).reduce((s, t) => s + t.amount, 0)
+    : 0;
 
   const filteredTransactions = activeTransactions.filter(tx => {
     const matchesSearch = 
@@ -48,14 +63,19 @@ export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
       tx.paymentMode.toLowerCase().includes(searchQuery.toLowerCase());
 
     if (!matchesSearch) return false;
-    if (filterType === 'in') return tx.type === 'in';
-    if (filterType === 'out') return tx.type === 'out';
+    if (filterType === 'in' && tx.type !== 'in') return false;
+    if (filterType === 'out' && tx.type !== 'out') return false;
+    if (paymentFilter !== 'all') {
+      const mode = tx.paymentMode.toLowerCase();
+      const target = paymentFilter.toLowerCase();
+      if (!mode.includes(target)) return false;
+    }
     return true;
   });
 
   return (
     <div className="space-y-6">
-      {/* 3 Metric Stat Cards matching Image 4 */}
+      {/* 3 Metric Stat Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {/* MONEY IN */}
         <div className="bg-[#EBF8F2] rounded-2xl p-5 border border-emerald-100/80 shadow-2xs">
@@ -88,7 +108,27 @@ export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
         </div>
       </div>
 
-      {/* Search & Add Entry Bar matching Image 4 */}
+      {/* Payment Method Income Breakdown Cards (Requirement 15) */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="bg-white rounded-xl p-3 border border-[#EFE9DF] shadow-2xs">
+          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">UPI Received</span>
+          <div className="text-base font-extrabold text-emerald-700 mt-1 tabular-nums">₹{upiReceived.toLocaleString('en-IN')}</div>
+        </div>
+        <div className="bg-white rounded-xl p-3 border border-[#EFE9DF] shadow-2xs">
+          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Cash Received</span>
+          <div className="text-base font-extrabold text-emerald-700 mt-1 tabular-nums">₹{cashReceived.toLocaleString('en-IN')}</div>
+        </div>
+        <div className="bg-white rounded-xl p-3 border border-[#EFE9DF] shadow-2xs">
+          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Card Received</span>
+          <div className="text-base font-extrabold text-emerald-700 mt-1 tabular-nums">₹{cardReceived.toLocaleString('en-IN')}</div>
+        </div>
+        <div className="bg-white rounded-xl p-3 border border-[#EFE9DF] shadow-2xs">
+          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Bank Transfer</span>
+          <div className="text-base font-extrabold text-emerald-700 mt-1 tabular-nums">₹{bankReceived.toLocaleString('en-IN')}</div>
+        </div>
+      </div>
+
+      {/* Search & Add Entry Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-3">
         <div className="relative flex-1">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-[#8C827A]" size={17} />
@@ -96,7 +136,7 @@ export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search entries"
+            placeholder="Search entries, customers, or payment modes"
             className="w-full pl-11 pr-4 py-2.5 rounded-xl bg-white border border-[#EFE9DF] text-sm text-[#1E232A] placeholder-[#A0988F] focus:outline-none focus:border-[#E85D43] transition-all shadow-2xs"
           />
         </div>
@@ -110,9 +150,9 @@ export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
         </button>
       </div>
 
-      {/* Filter Tabs */}
-      <div className="flex items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-2">
+      {/* Filter Tabs: Type & Payment Method */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+        <div className="flex items-center gap-1.5 flex-wrap">
           <button
             onClick={() => setFilterType('all')}
             className={`px-3 py-1.5 rounded-lg font-semibold transition-all ${
@@ -143,6 +183,22 @@ export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
           >
             Money Out
           </button>
+
+          <span className="text-[#A0988F] mx-1">|</span>
+
+          {['all', 'UPI', 'Cash', 'Card', 'Bank', 'Credit'].map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setPaymentFilter(mode)}
+              className={`px-2.5 py-1.5 rounded-lg font-semibold transition-all ${
+                paymentFilter === mode
+                  ? 'bg-[#E85D43] text-white shadow-2xs'
+                  : 'bg-white text-[#655E57] hover:bg-[#F2ECE2] border border-[#EFE9DF]'
+              }`}
+            >
+              {mode === 'all' ? 'All Methods' : mode}
+            </button>
+          ))}
         </div>
 
         <button
