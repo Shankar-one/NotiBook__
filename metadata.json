@@ -1,0 +1,6 @@
+{
+  "name": "NotiBook - Smart Business Ledger & Khatabook",
+  "description": "Minimalist voice-enabled smart business ledger, billing invoice generator, customer khatabook, and inventory manager for modern merchants.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

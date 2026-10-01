@@ -1,0 +1,577 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useEffect } from 'react';
+import { Sidebar } from './components/Sidebar';
+import { Header } from './components/Header';
+import { HomeDashboard } from './components/HomeDashboard';
+import { CustomersView } from './components/CustomersView';
+import { BookAndLedgerView } from './components/BookAndLedgerView';
+import { VoiceRecordModal } from './components/VoiceRecordModal';
+import { AddCustomerModal } from './components/AddCustomerModal';
+import { AddTransactionModal } from './components/AddTransactionModal';
+import { AddProductModal } from './components/AddProductModal';
+import { CustomerLedgerModal } from './components/CustomerLedgerModal';
+import { InvoicePrintModal } from './components/InvoicePrintModal';
+import { SettingsModal } from './components/SettingsModal';
+import { SearchModal } from './components/SearchModal';
+import { JarvisHUD } from './components/JarvisHUD';
+import { voiceSession } from './voice';
+import { 
+  Customer, 
+  Invoice, 
+  Product, 
+  ShopSettings, 
+  Transaction, 
+  CustomerTransaction 
+} from './types';
+import { 
+  defaultShopSettings, 
+  sampleCustomers, 
+  sampleCustomerTransactions, 
+  sampleInvoices, 
+  sampleProducts, 
+  sampleTransactions 
+} from './data/mockData';
+import { ParsedCommandResult } from './utils/aiCommandParser';
+
+export default function App() {
+  // Navigation State
+  const [activeTab, setActiveTab] = useState<'home' | 'customers' | 'book'>('home');
+  const [activeBookSubtab, setActiveBookSubtab] = useState<'billing' | 'transactions' | 'stocks'>('billing');
+  const [collapsedSidebar, setCollapsedSidebar] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  // Display State: Populated vs Empty Clean State
+  const [isPopulatedState, setIsPopulatedState] = useState(true);
+
+  // Sync state
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncTimeText, setSyncTimeText] = useState('Synced just now');
+
+  // Business Data State (with localStorage persistence)
+  const [settings, setSettings] = useState<ShopSettings>(() => {
+    const saved = localStorage.getItem('notibook_settings');
+    return saved ? JSON.parse(saved) : defaultShopSettings;
+  });
+
+  const [customers, setCustomers] = useState<Customer[]>(() => {
+    const saved = localStorage.getItem('notibook_customers');
+    return saved ? JSON.parse(saved) : sampleCustomers;
+  });
+
+  const [customerTransactions, setCustomerTransactions] = useState<Record<string, CustomerTransaction[]>>(() => {
+    const saved = localStorage.getItem('notibook_customer_txs');
+    return saved ? JSON.parse(saved) : sampleCustomerTransactions;
+  });
+
+  const [transactions, setTransactions] = useState<Transaction[]>(() => {
+    const saved = localStorage.getItem('notibook_transactions');
+    return saved ? JSON.parse(saved) : sampleTransactions;
+  });
+
+  const [products, setProducts] = useState<Product[]>(() => {
+    const saved = localStorage.getItem('notibook_products');
+    return saved ? JSON.parse(saved) : sampleProducts;
+  });
+
+  const [invoices, setInvoices] = useState<Invoice[]>(() => {
+    const saved = localStorage.getItem('notibook_invoices');
+    return saved ? JSON.parse(saved) : sampleInvoices;
+  });
+
+  // Modal States
+  const [isVoiceOpen, setIsVoiceOpen] = useState(false);
+  const [isAddCustomerOpen, setIsAddCustomerOpen] = useState(false);
+  const [isAddTxOpen, setIsAddTxOpen] = useState(false);
+  const [addTxConfig, setAddTxConfig] = useState<{ defaultType?: 'in' | 'out'; defaultCategory?: string }>({});
+  const [isAddProductOpen, setIsAddProductOpen] = useState(false);
+  const [selectedCustomerForLedger, setSelectedCustomerForLedger] = useState<Customer | null>(null);
+  const [viewingInvoice, setViewingInvoice] = useState<Invoice | null>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+
+  // Sync back to localStorage
+  useEffect(() => {
+    localStorage.setItem('notibook_settings', JSON.stringify(settings));
+  }, [settings]);
+
+  useEffect(() => {
+    localStorage.setItem('notibook_customers', JSON.stringify(customers));
+  }, [customers]);
+
+  useEffect(() => {
+    localStorage.setItem('notibook_customer_txs', JSON.stringify(customerTransactions));
+  }, [customerTransactions]);
+
+  useEffect(() => {
+    localStorage.setItem('notibook_transactions', JSON.stringify(transactions));
+  }, [transactions]);
+
+  useEffect(() => {
+    localStorage.setItem('notibook_products', JSON.stringify(products));
+  }, [products]);
+
+  useEffect(() => {
+    localStorage.setItem('notibook_invoices', JSON.stringify(invoices));
+  }, [invoices]);
+
+  // Wire VoiceSessionManager with React state & router
+  useEffect(() => {
+    voiceSession.setActionCallbacks({
+      onNavigate: (page) => {
+        if (page === 'home') setActiveTab('home');
+        else if (page === 'customers') setActiveTab('customers');
+        else if (page === 'billing') {
+          setActiveTab('book');
+          setActiveBookSubtab('billing');
+        } else if (page === 'transactions') {
+          setActiveTab('book');
+          setActiveBookSubtab('transactions');
+        } else if (page === 'stocks') {
+          setActiveTab('book');
+          setActiveBookSubtab('stocks');
+        }
+      },
+      onCustomerUpdated: (cust) => {
+        setCustomers((prev) => {
+          const exists = prev.some((c) => c.id === cust.id);
+          return exists ? prev.map((c) => (c.id === cust.id ? cust : c)) : [cust, ...prev];
+        });
+      },
+      onTransactionAdded: (tx) => {
+        setTransactions((prev) => [tx, ...prev]);
+      },
+      onRefreshData: () => {
+        const savedCust = localStorage.getItem('notibook_customers');
+        if (savedCust) setCustomers(JSON.parse(savedCust));
+        const savedTx = localStorage.getItem('notibook_transactions');
+        if (savedTx) setTransactions(JSON.parse(savedTx));
+      },
+    });
+  }, []);
+
+  // Sync trigger
+  const handleSync = () => {
+    setIsSyncing(true);
+    setTimeout(() => {
+      setIsSyncing(false);
+      setSyncTimeText('Synced just now');
+    }, 600);
+  };
+
+  // Switch display state toggle
+  const handleTogglePopulatedState = () => {
+    setIsPopulatedState(prev => !prev);
+  };
+
+  // Add Customer
+  const handleAddCustomer = (newCustomer: Customer) => {
+    setCustomers(prev => [newCustomer, ...prev]);
+    setIsPopulatedState(true);
+  };
+
+  // Add Transaction
+  const handleAddTransaction = (newTx: Transaction) => {
+    setTransactions(prev => [newTx, ...prev]);
+    setIsPopulatedState(true);
+
+    // If transaction involves a customer payment, also update their balance
+    if (newTx.category === 'Customer Payment' && newTx.partyName) {
+      const matchedCust = customers.find(c => c.name.toLowerCase() === newTx.partyName?.toLowerCase());
+      if (matchedCust) {
+        handleCustomerTx(matchedCust.id, 'got', newTx.amount, `Payment via ${newTx.paymentMode}`);
+      }
+    }
+  };
+
+  // Add Product
+  const handleAddProduct = (newProd: Product) => {
+    setProducts(prev => [newProd, ...prev]);
+    setIsPopulatedState(true);
+  };
+
+  // Stock Adjustment
+  const handleUpdateStockQty = (id: string, delta: number) => {
+    setProducts(prev => prev.map(p => {
+      if (p.id === id) {
+        return { ...p, stockQty: Math.max(0, p.stockQty + delta) };
+      }
+      return p;
+    }));
+  };
+
+  // Delete Product
+  const handleDeleteProduct = (id: string) => {
+    setProducts(prev => prev.filter(p => p.id !== id));
+  };
+
+  // Import Sample Products
+  const handleImportSampleProducts = () => {
+    setProducts(sampleProducts);
+    setIsPopulatedState(true);
+  };
+
+  // Finalize Invoice
+  const handleFinalizeBill = (newInvoice: Invoice) => {
+    setInvoices(prev => [newInvoice, ...prev]);
+    setIsPopulatedState(true);
+
+    // Add corresponding ledger transaction
+    const newTx: Transaction = {
+      id: `tx-${Date.now()}`,
+      date: new Intl.DateTimeFormat('en-IN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      }).format(new Date()),
+      type: 'in',
+      category: 'Sale',
+      description: `Invoice ${newInvoice.invoiceNumber} (${newInvoice.items.length} items)`,
+      partyName: newInvoice.customerName,
+      paymentMode: newInvoice.paymentMode === 'Credit' ? 'Credit' : newInvoice.paymentMode === 'UPI' ? 'UPI' : 'Cash',
+      amount: newInvoice.grandTotal,
+    };
+    setTransactions(prev => [newTx, ...prev]);
+
+    // If customer bought on credit, update customer khatabook
+    if (newInvoice.paymentMode === 'Credit') {
+      const cust = customers.find(c => c.name.toLowerCase() === newInvoice.customerName.toLowerCase());
+      if (cust) {
+        handleCustomerTx(cust.id, 'gave', newInvoice.grandTotal, `Bill ${newInvoice.invoiceNumber}`);
+      }
+    }
+  };
+
+  // Customer Khatabook Transaction (Gave / Got)
+  const handleCustomerTx = (
+    customerId: string, 
+    type: 'gave' | 'got', 
+    amount: number, 
+    note: string
+  ) => {
+    const newCtx: CustomerTransaction = {
+      id: `ctx-${Date.now()}`,
+      customerId,
+      type,
+      amount,
+      date: new Intl.DateTimeFormat('en-CA').format(new Date()),
+      note,
+    };
+
+    setCustomerTransactions(prev => ({
+      ...prev,
+      [customerId]: [newCtx, ...(prev[customerId] || [])]
+    }));
+
+    // Update customer balance: gave increases due, got decreases due
+    setCustomers(prev => prev.map(c => {
+      if (c.id === customerId) {
+        const delta = type === 'gave' ? amount : -amount;
+        const newBal = c.balance + delta;
+        return {
+          ...c,
+          balance: newBal,
+          status: newBal > 0 ? 'due' : newBal < 0 ? 'advance' : 'settled',
+          lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+        };
+      }
+      return c;
+    }));
+
+    // Also update selectedCustomerForLedger if currently open
+    setSelectedCustomerForLedger(prev => {
+      if (prev && prev.id === customerId) {
+        const delta = type === 'gave' ? amount : -amount;
+        const newBal = prev.balance + delta;
+        return {
+          ...prev,
+          balance: newBal,
+          status: newBal > 0 ? 'due' : newBal < 0 ? 'advance' : 'settled',
+          lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+        };
+      }
+      return prev;
+    });
+  };
+
+  // Voice Command Action Handler
+  const handleApplyVoiceResult = (result: ParsedCommandResult) => {
+    if (result.action === 'add_expense' && result.data?.expenseAmount) {
+      handleAddTransaction({
+        id: `tx-${Date.now()}`,
+        date: new Intl.DateTimeFormat('en-IN', {
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+        }).format(new Date()),
+        type: 'out',
+        category: 'Expense',
+        description: result.data.expenseNote || 'Expense logged via voice',
+        paymentMode: 'Cash',
+        amount: result.data.expenseAmount,
+      });
+      setActiveTab('book');
+      setActiveBookSubtab('transactions');
+    } else if (result.action === 'customer_payment' && result.data?.customerName && result.data?.paymentAmount) {
+      const cust = customers.find(c => c.name.toLowerCase().includes(result.data!.customerName!.toLowerCase()));
+      if (cust) {
+        handleCustomerTx(cust.id, 'got', result.data.paymentAmount, 'Payment recorded via Voice Command');
+        setSelectedCustomerForLedger(cust);
+      } else {
+        handleAddTransaction({
+          id: `tx-${Date.now()}`,
+          date: new Intl.DateTimeFormat('en-IN').format(new Date()),
+          type: 'in',
+          category: 'Customer Payment',
+          description: `Payment from ${result.data.customerName}`,
+          paymentMode: 'UPI',
+          amount: result.data.paymentAmount,
+        });
+      }
+      setActiveTab('customers');
+    } else {
+      // Direct user to billing tab where draft is ready
+      setActiveTab('book');
+      setActiveBookSubtab('billing');
+    }
+  };
+
+  // WhatsApp Reminder Sender
+  const handleSendWhatsappReminder = (customer: Customer) => {
+    const text = encodeURIComponent(
+      `Namaste ${customer.name} ji, this is a reminder from ${settings.shopName}. Your outstanding balance is ₹${customer.balance}. Kindly clear the dues at your convenience. UPI ID: ${settings.phone}. Dhanyawad!`
+    );
+    const cleanPhone = customer.phone.replace(/[^0-9]/g, '');
+    const url = `https://wa.me/${cleanPhone}?text=${text}`;
+    window.open(url, '_blank');
+  };
+
+  // Reset Data to Clean Default
+  const handleResetData = () => {
+    if (confirm('Are you sure you want to reset all shop data?')) {
+      localStorage.clear();
+      setSettings(defaultShopSettings);
+      setCustomers(sampleCustomers);
+      setCustomerTransactions(sampleCustomerTransactions);
+      setTransactions(sampleTransactions);
+      setProducts(sampleProducts);
+      setInvoices(sampleInvoices);
+      setIsPopulatedState(true);
+    }
+  };
+
+  // Export Book Data
+  const handleExportBook = () => {
+    const exportBundle = {
+      settings,
+      customers,
+      customerTransactions,
+      transactions,
+      products,
+      invoices,
+      exportedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(exportBundle, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `NotiBook_Ledger_Export_${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="min-h-screen bg-[#FAF7F2] text-[#1E232A] flex">
+      {/* Mobile Backdrop */}
+      {mobileNavOpen && (
+        <div 
+          onClick={() => setMobileNavOpen(false)}
+          className="fixed inset-0 z-20 bg-black/40 md:hidden"
+        />
+      )}
+
+      {/* Left Navigation Sidebar */}
+      <div className={`${mobileNavOpen ? 'block' : 'hidden'} md:block`}>
+        <Sidebar
+          activeTab={activeTab}
+          setActiveTab={(tab) => {
+            setActiveTab(tab);
+            setMobileNavOpen(false);
+          }}
+          onOpenVoice={() => setIsVoiceOpen(true)}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          settings={settings}
+          collapsed={collapsedSidebar}
+          setCollapsed={setCollapsedSidebar}
+        />
+      </div>
+
+      {/* Main App Container */}
+      <div 
+        className={`flex-1 flex flex-col min-w-0 transition-all duration-300 ease-in-out ${
+          collapsedSidebar ? 'md:ml-20' : 'md:ml-64'
+        }`}
+      >
+        {/* Top Header */}
+        <Header
+          onOpenVoice={() => setIsVoiceOpen(true)}
+          onOpenSearch={() => setIsSearchOpen(true)}
+          onToggleMobileNav={() => setMobileNavOpen(prev => !prev)}
+          isPopulatedState={isPopulatedState}
+          onTogglePopulatedState={handleTogglePopulatedState}
+          onSync={handleSync}
+          isSyncing={isSyncing}
+          syncTimeText={syncTimeText}
+        />
+
+        {/* View Routing */}
+        <main className="flex-1 p-4 sm:p-6 lg:p-8">
+          {activeTab === 'home' && (
+            <HomeDashboard
+              settings={settings}
+              customers={customers}
+              transactions={transactions}
+              invoices={invoices}
+              onNavigate={(tab, subtab) => {
+                setActiveTab(tab);
+                if (subtab) setActiveBookSubtab(subtab);
+              }}
+              onOpenVoice={() => setIsVoiceOpen(true)}
+              onOpenAddCustomer={() => setIsAddCustomerOpen(true)}
+              onOpenAddTransaction={(type, cat) => {
+                setAddTxConfig({ defaultType: type, defaultCategory: cat });
+                setIsAddTxOpen(true);
+              }}
+              onOpenInvoiceModal={(inv) => setViewingInvoice(inv)}
+              isPopulatedState={isPopulatedState}
+              onSendWhatsappReminder={handleSendWhatsappReminder}
+            />
+          )}
+
+          {activeTab === 'customers' && (
+            <CustomersView
+              customers={customers}
+              onOpenAddCustomer={() => setIsAddCustomerOpen(true)}
+              onSelectCustomer={(c) => setSelectedCustomerForLedger(c)}
+              onSendWhatsappReminder={handleSendWhatsappReminder}
+              isPopulatedState={isPopulatedState}
+              onTogglePopulatedState={handleTogglePopulatedState}
+            />
+          )}
+
+          {activeTab === 'book' && (
+            <BookAndLedgerView
+              activeSubtab={activeBookSubtab}
+              setActiveSubtab={setActiveBookSubtab}
+              settings={settings}
+              customers={customers}
+              products={products}
+              invoices={invoices}
+              transactions={transactions}
+              onFinalizeBill={handleFinalizeBill}
+              onOpenInvoiceModal={(inv) => setViewingInvoice(inv)}
+              onOpenAddTransaction={() => {
+                setAddTxConfig({});
+                setIsAddTxOpen(true);
+              }}
+              onOpenAddProduct={() => setIsAddProductOpen(true)}
+              onUpdateStockQty={handleUpdateStockQty}
+              onDeleteProduct={handleDeleteProduct}
+              onImportSampleProducts={handleImportSampleProducts}
+              isPopulatedState={isPopulatedState}
+              onTogglePopulatedState={handleTogglePopulatedState}
+              onExportBook={handleExportBook}
+            />
+          )}
+        </main>
+      </div>
+
+      {/* Modals & Dialogs */}
+      <VoiceRecordModal
+        isOpen={isVoiceOpen}
+        onClose={() => setIsVoiceOpen(false)}
+        products={products}
+        customers={customers}
+        onApplyParsedResult={handleApplyVoiceResult}
+      />
+
+      <AddCustomerModal
+        isOpen={isAddCustomerOpen}
+        onClose={() => setIsAddCustomerOpen(false)}
+        onAddCustomer={handleAddCustomer}
+      />
+
+      <AddTransactionModal
+        isOpen={isAddTxOpen}
+        onClose={() => setIsAddTxOpen(false)}
+        onAddTransaction={handleAddTransaction}
+        customers={customers}
+        defaultType={addTxConfig.defaultType}
+        defaultCategory={addTxConfig.defaultCategory}
+      />
+
+      <AddProductModal
+        isOpen={isAddProductOpen}
+        onClose={() => setIsAddProductOpen(false)}
+        onAddProduct={handleAddProduct}
+      />
+
+      <CustomerLedgerModal
+        isOpen={!!selectedCustomerForLedger}
+        customer={selectedCustomerForLedger}
+        onClose={() => setSelectedCustomerForLedger(null)}
+        transactions={selectedCustomerForLedger ? (customerTransactions[selectedCustomerForLedger.id] || []) : []}
+        onAddCustomerTx={handleCustomerTx}
+        onSendWhatsappReminder={handleSendWhatsappReminder}
+        settings={settings}
+      />
+
+      <InvoicePrintModal
+        isOpen={!!viewingInvoice}
+        invoice={viewingInvoice}
+        onClose={() => setViewingInvoice(null)}
+        settings={settings}
+      />
+
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        settings={settings}
+        onSaveSettings={setSettings}
+        onResetData={handleResetData}
+        onExportData={handleExportBook}
+        isPopulatedState={isPopulatedState}
+        onTogglePopulatedState={handleTogglePopulatedState}
+      />
+
+      <SearchModal
+        isOpen={isSearchOpen}
+        onClose={() => setIsSearchOpen(false)}
+        customers={customers}
+        invoices={invoices}
+        products={products}
+        onSelectCustomer={(c) => setSelectedCustomerForLedger(c)}
+        onSelectInvoice={(inv) => setViewingInvoice(inv)}
+        onNavigateToTab={(tab, subtab) => {
+          setActiveTab(tab);
+          if (subtab) setActiveBookSubtab(subtab);
+        }}
+      />
+
+      {/* Real-time Jarvis Voice Assistant HUD */}
+      <JarvisHUD
+        onNavigateToTab={(tab, subtab) => {
+          setActiveTab(tab);
+          if (subtab) setActiveBookSubtab(subtab);
+        }}
+      />
+    </div>
+  );
+}
