@@ -67,3 +67,22 @@ export async function deleteCustomerApi(id: string): Promise<boolean> {
     return true;
   }
 }
+
+export async function updateCustomerApi(id: string, updates: Partial<Customer>): Promise<Customer | null> {
+  try {
+    const res = await apiRequest<{ customer: Customer }>(`/api/customers/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+    return res.customer;
+  } catch {
+    const all = await fetchCustomers();
+    const target = all.find(c => c.id === id);
+    if (!target) return null;
+    const updatedCustomer: Customer = { ...target, ...updates };
+    const updatedList = all.map(c => c.id === id ? updatedCustomer : c);
+    localStorage.setItem('notibook_customers', JSON.stringify(updatedList));
+    return updatedCustomer;
+  }
+}
+

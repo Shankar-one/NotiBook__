@@ -83,8 +83,6 @@ export const VoiceRecordModal: React.FC<VoiceRecordModalProps> = ({
 
   const handleSimulatePhrase = async (phrase: string) => {
     setTranscript(phrase);
-    const res = parseBusinessCommand(phrase, products, customers);
-    setParsedResult(res);
     await voiceSession.sendManualUtterance(phrase);
   };
 
@@ -225,11 +223,20 @@ export const VoiceRecordModal: React.FC<VoiceRecordModalProps> = ({
           </span>
           <div className="flex flex-wrap gap-1.5">
             {[
+              'एक रमेश सा कस्टमर',
+              'Add Ramesh as customer',
+              'राहुल करके कस्टमर बनाओ',
+              'रवि का बैलेंस बताओ',
               'Ravi ka balance batao',
               'Usmein 500 add kar do',
-              'Ab uski last transaction batao',
               'Ravi ki last transaction delete karo',
+              'Total udhar kitna hai?',
               'Customers kholo',
+              'Billing page kholo',
+              'दुकान की सेटिंग खोलो',
+              'नया ग्राहक जोड़ने का फॉर्म खोलो',
+              'Open search bar',
+              'रवि का लेजर खोलो',
               'Aaj kitna paisa aaya?',
             ].map((ex, i) => (
               <button

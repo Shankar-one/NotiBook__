@@ -78,6 +78,10 @@ export class GeminiLiveManager {
           const res = await this.actionRouter.deleteCustomer(pendingConfirmation.payload.customerId, userLang);
           this.respond(res.responseText, userLang);
           return res.responseText;
+        } else if (pendingConfirmation.action === 'delete_reminder') {
+          const res = await this.actionRouter.deleteReminder(pendingConfirmation.payload.reminderId, userLang);
+          this.respond(res.responseText, userLang);
+          return res.responseText;
         }
       } else if (ConfirmationManager.isNegative(text)) {
         this.contextManager.clearPendingConfirmation();
@@ -94,6 +98,18 @@ export class GeminiLiveManager {
     // 2. Check for Pending Slot-Filling
     const pendingSlot = this.contextManager.getPendingSlotFilling();
     if (pendingSlot) {
+      if (pendingSlot.action === 'add_customer') {
+        const rawName = text.replace(/^(naam|name|hai|is)\s*/i, '').trim();
+        if (rawName) {
+          this.contextManager.clearPendingSlotFilling();
+          const cleanName = rawName.charAt(0).toUpperCase() + rawName.slice(1);
+          const res = await this.actionRouter.addCustomer({ name: cleanName, lang: userLang });
+          this.contextManager.setActiveCustomer(res.customer);
+          this.respond(res.responseText, userLang);
+          return res.responseText;
+        }
+      }
+
       if (pendingSlot.action === 'add_transaction') {
         const numMatch = text.match(/\d+/);
         if (pendingSlot.missingFields.includes('amount') && numMatch) {
@@ -200,18 +216,53 @@ export class GeminiLiveManager {
     const { name, args } = toolCall;
 
     try {
+      // 1. CUSTOMERS
       if (name === 'add_customer') {
         const custName = args.name || args.customer_name;
         const res = await this.actionRouter.addCustomer({
           name: custName,
           phone: args.phone,
           openingBalance: args.opening_balance,
+          address: args.address,
           lang: userLang,
         });
         this.contextManager.setActiveCustomer(res.customer);
-        return res.responseText;
+        return args.speech_response || res.responseText;
       }
 
+      if (name === 'get_customer') {
+        const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
+        const res = await this.actionRouter.getCustomer(custName, userLang);
+        this.contextManager.setActiveCustomer(res.customer);
+        return args.speech_response || res.responseText;
+      }
+
+      if (name === 'update_customer') {
+        const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
+        const res = await this.actionRouter.updateCustomer({
+          customerNameOrId: custName,
+          phone: args.phone,
+          address: args.address,
+          lang: userLang,
+        });
+        this.contextManager.setActiveCustomer(res.customer);
+        return args.speech_response || res.responseText;
+      }
+
+      if (name === 'delete_customer') {
+        const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name || 'Customer';
+        const all = await fetchCustomers();
+        const cust = all.find(c => c.name.toLowerCase() === custName.toLowerCase()) || resolvedCustomer;
+        this.contextManager.setPendingConfirmation({
+          action: 'delete_customer',
+          payload: { customerId: cust?.id || custName },
+          message: custName,
+          description: custName,
+        });
+        return args.speech_response || ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
+      }
+
+      // 2. BALANCES
       if (name === 'get_balance') {
         const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
         if (!custName) {
@@ -223,9 +274,15 @@ export class GeminiLiveManager {
         }
         const res = await this.actionRouter.getBalance(custName, userLang);
         this.contextManager.setActiveCustomer(res.customer);
-        return res.statusText;
+        return args.speech_response || res.statusText;
       }
 
+      if (name === 'get_account_balance') {
+        const res = await this.actionRouter.getAccountBalance(userLang);
+        return args.speech_response || res.responseText;
+      }
+
+      // 3. TRANSACTIONS
       if (name === 'add_transaction') {
         const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
         if (!args.amount) {
@@ -260,7 +317,27 @@ export class GeminiLiveManager {
           description: res.transaction.description,
           type: res.transaction.type === 'in' ? 'credit' : 'debit',
         });
-        return res.responseText;
+        return args.speech_response || res.responseText;
+      }
+
+      if (name === 'get_transactions') {
+        const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
+        const res = await this.actionRouter.getTransactions({
+          customerNameOrId: custName,
+          limit: args.limit || 3,
+          lang: userLang,
+        });
+        return args.speech_response || res.responseText;
+      }
+
+      if (name === 'update_transaction') {
+        const res = await this.actionRouter.updateTransaction({
+          transactionId: args.transaction_id || this.contextManager.getActiveTransaction()?.id || 'last-tx',
+          amount: args.amount,
+          description: args.description,
+          lang: userLang,
+        });
+        return args.speech_response || res.responseText;
       }
 
       if (name === 'delete_transaction') {
@@ -282,16 +359,62 @@ export class GeminiLiveManager {
           description: promptDesc,
         });
 
-        return ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
+        return args.speech_response || ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
       }
 
+      // 4. REPORTS
       if (name === 'get_report') {
         const res = await this.actionRouter.getReport(args.period || 'today', userLang);
-        return res.responseText;
+        return args.speech_response || res.responseText;
       }
 
+      // 5. REMINDERS
+      if (name === 'add_reminder') {
+        const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
+        const res = await this.actionRouter.addReminder({
+          customerNameOrId: custName,
+          amount: args.amount,
+          dueDate: args.due_date,
+          message: args.message,
+          lang: userLang,
+        });
+        return args.speech_response || res.responseText;
+      }
+
+      if (name === 'get_reminders') {
+        const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
+        const res = await this.actionRouter.getReminders(custName, userLang);
+        return args.speech_response || res.responseText;
+      }
+
+      if (name === 'update_reminder') {
+        const res = await this.actionRouter.updateReminder({
+          reminderId: args.reminder_id,
+          status: args.status,
+          lang: userLang,
+        });
+        return args.speech_response || res.responseText;
+      }
+
+      if (name === 'delete_reminder') {
+        this.contextManager.setPendingConfirmation({
+          action: 'delete_reminder',
+          payload: { reminderId: args.reminder_id || 'rem-1' },
+          message: args.customer_name || 'Reminder',
+          description: args.customer_name ? `${args.customer_name} का रिमाइंडर` : 'रिमाइंडर',
+        });
+        return args.speech_response || ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
+      }
+
+      // 6. NAVIGATION (Tabs, subtabs, and smaller things)
       if (name === 'navigate') {
-        const res = this.actionRouter.navigate(args.page || 'home', userLang);
+        const target = args.target || args.page || 'home';
+        const res = this.actionRouter.navigate(
+          target,
+          { customerName: args.customer_name, transactionType: args.transaction_type },
+          userLang,
+          args.speech_response
+        );
         return res.responseText;
       }
 
@@ -318,21 +441,24 @@ export class GeminiLiveManager {
     const raw = text.trim();
     const lower = raw.toLowerCase();
 
-    // 1. Add Customer (e.g. "राहुल करके कस्टमर बनाओ", "Rahul karke customer banao", "Add Rahul as customer")
-    const custAddMatchHindi = raw.match(/([^\s]+)\s*(?:करके|को)?\s*(?:कस्टमर|ग्राहक)\s*(?:बनाओ|जोड़ो|ऐड\s*करो)/i);
+    // 1. Add Customer (e.g. "एक रमेश सा कस्टमर", "Add Ramesh as customer", "रमेश करके कस्टमर बनाओ", "Add customer")
+    const hindiSpecificCustomerMatch = raw.match(/एक\s+([^\s]+)\s+(?:सा\s+)?(?:कस्टमर|ग्राहक)/i);
+    const custAddMatchHindi = hindiSpecificCustomerMatch || raw.match(/([^\s]+)\s*(?:करके|सा|को)?\s*(?:कस्टमर|ग्राहक)\s*(?:बनाओ|जोड़ो|ऐड\s*करो|बना\s*दो|ऐड\s*कर\s*दो)/i);
     const custAddMatchEnglish = lower.match(/(?:add|create)\s+([a-zA-Z\s]+?)\s+(?:as\s+(?:a\s+)?customer|to\s+customers)/i) ||
                                 lower.match(/(?:customer\s+banao|customer\s+add\s+karo)\s+([a-zA-Z\s]+)/i) ||
                                 lower.match(/([a-zA-Z\s]+?)\s*(?:ko|karke)?\s*customer\s*(?:banao|add\s*karo)/i);
 
     if (custAddMatchHindi) {
-      const name = custAddMatchHindi[1].replace(/^(नया|न्यू)\s*/, '').trim();
-      const res = await this.actionRouter.addCustomer({ name, lang: userLang });
-      this.contextManager.setActiveCustomer(res.customer);
-      return res.responseText;
+      const name = custAddMatchHindi[1].replace(/^(नया|न्यू|एक)\s*/, '').trim();
+      if (name && name !== 'कस्टमर' && name !== 'ग्राहक') {
+        const res = await this.actionRouter.addCustomer({ name, lang: userLang });
+        this.contextManager.setActiveCustomer(res.customer);
+        return res.responseText;
+      }
     }
     if (custAddMatchEnglish && (lower.includes('customer') || lower.includes('कस्टमर'))) {
       const name = custAddMatchEnglish[1].replace(/^(new|naya)\s*/i, '').trim();
-      if (name && !name.includes('page') && !name.includes('kholo')) {
+      if (name && !name.includes('page') && !name.includes('kholo') && name !== 'a' && name !== 'the') {
         const formattedName = name.charAt(0).toUpperCase() + name.slice(1);
         const res = await this.actionRouter.addCustomer({ name: formattedName, lang: userLang });
         this.contextManager.setActiveCustomer(res.customer);
@@ -340,25 +466,81 @@ export class GeminiLiveManager {
       }
     }
 
-    // 2. Navigation intent
-    if (lower.includes('customer page') || lower.includes('customers kholo') || lower.includes('show customers') || raw.includes('कस्टमर्स खोलो') || raw.includes('ग्राहक पेज')) {
-      const res = this.actionRouter.navigate('customers', userLang);
+    // Missing customer name question
+    if (
+      lower === 'add customer' ||
+      lower === 'create customer' ||
+      lower === 'customer banao' ||
+      lower === 'naya customer banao' ||
+      raw === 'कस्टमर बनाओ' ||
+      raw === 'नया ग्राहक बनाओ' ||
+      raw === 'ग्राहक जोड़ो'
+    ) {
+      this.contextManager.setPendingSlotFilling({
+        action: 'add_customer',
+        missingFields: ['name'],
+        gathered: {},
+        promptQuestion: 'Kis naam se?',
+      });
+      return formatLocalizedResponse(userLang, {
+        hindi: 'किस नाम से नया ग्राहक बनाना है?',
+        hinglish: 'Kis naam se naya customer add karna hai?',
+        english: 'What is the name for the new customer?',
+      });
+    }
+
+    // 2. Navigation intent (All tabs, subtabs, and smaller things)
+    if (lower.includes('setting') || raw.includes('सेटिंग')) {
+      const res = this.actionRouter.navigate('settings_modal', undefined, userLang);
       return res.responseText;
     }
-    if (lower.includes('transaction page') || lower.includes('transactions kholo') || lower.includes('show transactions') || lower.includes('ledger kholo') || raw.includes('लेनदेन खोलो') || raw.includes('खाता खोलो')) {
-      const res = this.actionRouter.navigate('transactions', userLang);
+    if (lower.includes('search') || raw.includes('सर्च')) {
+      const res = this.actionRouter.navigate('search_modal', undefined, userLang);
+      return res.responseText;
+    }
+    if (lower.includes('add customer') || lower.includes('customer form') || raw.includes('नया ग्राहक फॉर्म') || raw.includes('कस्टमर फॉर्म')) {
+      const res = this.actionRouter.navigate('add_customer_modal', undefined, userLang);
+      return res.responseText;
+    }
+    if (lower.includes('add transaction') || lower.includes('entry form') || lower.includes('cash in') || lower.includes('cash out') || raw.includes('लेनदेन फॉर्म') || raw.includes('एंट्री फॉर्म')) {
+      const res = this.actionRouter.navigate('add_transaction_modal', undefined, userLang);
+      return res.responseText;
+    }
+    if (lower.includes('add product') || lower.includes('product form') || raw.includes('सामान फॉर्म') || raw.includes('प्रोडक्ट फॉर्म')) {
+      const res = this.actionRouter.navigate('add_product_modal', undefined, userLang);
+      return res.responseText;
+    }
+    if (lower.includes('invoice') || lower.includes('receipt') || raw.includes('रसीद') || raw.includes('बिल प्रीव्यू')) {
+      const res = this.actionRouter.navigate('invoice_modal', undefined, userLang);
+      return res.responseText;
+    }
+    if (lower.includes('sidebar') || raw.includes('साइडबार')) {
+      const res = this.actionRouter.navigate('toggle_sidebar', undefined, userLang);
+      return res.responseText;
+    }
+    if (lower.includes('ledger') || lower.includes('khata kholo') || raw.includes('खाता खोलो') || raw.includes('लेजर खोलो')) {
+      const cust = resolvedCust || (this.contextManager.getActiveCustomer() ? allCustomers.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : allCustomers[0]);
+      const res = this.actionRouter.navigate('customer_ledger_modal', { customerName: cust?.name }, userLang);
+      return res.responseText;
+    }
+    if (lower.includes('customer page') || lower.includes('customers kholo') || lower.includes('show customers') || raw.includes('कस्टमर्स खोलो') || raw.includes('ग्राहक पेज')) {
+      const res = this.actionRouter.navigate('customers', undefined, userLang);
+      return res.responseText;
+    }
+    if (lower.includes('transaction page') || lower.includes('transactions kholo') || lower.includes('show transactions') || lower.includes('ledger page') || raw.includes('लेनदेन खोलो')) {
+      const res = this.actionRouter.navigate('transactions', undefined, userLang);
       return res.responseText;
     }
     if (lower.includes('billing kholo') || lower.includes('invoice open') || lower.includes('billing page') || raw.includes('बिलिंग खोलो')) {
-      const res = this.actionRouter.navigate('billing', userLang);
+      const res = this.actionRouter.navigate('billing', undefined, userLang);
       return res.responseText;
     }
     if (lower.includes('stock kholo') || lower.includes('stocks kholo') || lower.includes('inventory page') || raw.includes('स्टॉक खोलो')) {
-      const res = this.actionRouter.navigate('stocks', userLang);
+      const res = this.actionRouter.navigate('stocks', undefined, userLang);
       return res.responseText;
     }
     if (lower.includes('dashboard') || lower.includes('home kholo') || lower.includes('home page') || raw.includes('डैशबोर्ड खोलो')) {
-      const res = this.actionRouter.navigate('home', userLang);
+      const res = this.actionRouter.navigate('home', undefined, userLang);
       return res.responseText;
     }
 
@@ -391,7 +573,13 @@ export class GeminiLiveManager {
       return ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
     }
 
-    // 5. Balance query intent
+    // 5. Total dues / Market Udhar queries
+    if (lower.includes('total udhar') || lower.includes('baki paisa') || lower.includes('market udhar') || lower.includes('pending dues') || raw.includes('कुल उधारी') || raw.includes('बाकी पैसा') || raw.includes('कुल बकाया')) {
+      const res = await this.actionRouter.getAccountBalance(userLang);
+      return res.responseText;
+    }
+
+    // 6. Balance query intent
     if (lower.includes('balance') || lower.includes('kitna hai') || lower.includes('batao') || lower.includes('dues') || raw.includes('बैलेंस') || raw.includes('बकाया')) {
       const cust = resolvedCust || (this.contextManager.getActiveCustomer() ? allCustomers.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : null);
       if (cust) {
@@ -406,7 +594,7 @@ export class GeminiLiveManager {
       });
     }
 
-    // 6. Add transaction intent
+    // 7. Add transaction intent
     const addMatch = lower.match(/(?:add|jama|diye|de\s+do|credit|debit)\s*(?:karo|kar\s+do)?/i);
     const amountMatch = raw.match(/(?:₹|rs\.?|rupaye|rupees)?\s*(\d+)/i);
     const hasAmount = !!amountMatch;
@@ -451,18 +639,25 @@ export class GeminiLiveManager {
       return res.responseText;
     }
 
-    // 7. Last transaction query intent
-    if (lower.includes('last transaction') || lower.includes('pichli transaction') || lower.includes('uski last') || raw.includes('पिछला लेनदेन')) {
+    // 8. Reminders intent
+    if (lower.includes('reminder') || raw.includes('रिमाइंडर') || lower.includes('yaad dilao')) {
       const cust = resolvedCust || (this.contextManager.getActiveCustomer() ? allCustomers.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : null);
-      const name = cust ? cust.name : 'Ravi';
-      return formatLocalizedResponse(userLang, {
-        hindi: `${name} का पिछला लेनदेन ₹500 का दर्ज है।`,
-        hinglish: `${name} ki last transaction ₹500 ki thi.`,
-        english: `${name}'s last transaction was for ₹500.`,
-      });
+      const res = await this.actionRouter.getReminders(cust?.name, userLang);
+      return res.responseText;
     }
 
-    // 8. Identity & questions ("Who are you?", "Aap kaun ho?", "What is NotiBook?")
+    // 9. Last transaction query intent
+    if (lower.includes('last transaction') || lower.includes('pichli transaction') || lower.includes('uski last') || raw.includes('पिछला लेनदेन')) {
+      const cust = resolvedCust || (this.contextManager.getActiveCustomer() ? allCustomers.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : null);
+      const res = await this.actionRouter.getTransactions({
+        customerNameOrId: cust?.name,
+        limit: 1,
+        lang: userLang,
+      });
+      return res.responseText;
+    }
+
+    // 10. Identity & questions ("Who are you?", "Aap kaun ho?", "What is NotiBook?")
     if (lower.includes('who are you') || lower.includes('kaun ho') || lower.includes('kya ho') || raw.includes('कौन हो') || raw.includes('कौन हैं')) {
       return formatLocalizedResponse(userLang, {
         hindi: 'मैं जार्विस हूँ, नोटीबुक का वॉइस असिस्टेंट। मैं आपके ग्राहकों के खाते, दैनिक बिक्री, बिलिंग और उधारी का हिसाब रखने में मदद करता हूँ।',
@@ -471,33 +666,22 @@ export class GeminiLiveManager {
       });
     }
 
-    // 9. Total dues / Market Udhar queries
-    if (lower.includes('total udhar') || lower.includes('baki paisa') || lower.includes('market udhar') || lower.includes('pending dues') || raw.includes('कुल उधारी') || raw.includes('बाकी पैसा')) {
-      const totalDue = allCustomers.filter(c => c.balance > 0).reduce((s, c) => s + c.balance, 0);
-      const dueCount = allCustomers.filter(c => c.balance > 0).length;
-      return formatLocalizedResponse(userLang, {
-        hindi: `मार्केट में कुल ₹${totalDue.toLocaleString('en-IN')} का बकाया है, जो ${dueCount} ग्राहकों से लेना बाकी है।`,
-        hinglish: `Market me total ₹${totalDue.toLocaleString('en-IN')} udhar pending hai, jo ${dueCount} customers se lena hai.`,
-        english: `Total pending receivables amount to ₹${totalDue.toLocaleString('en-IN')} across ${dueCount} customers.`,
-      });
-    }
-
-    // 10. Customer count & list queries
+    // 11. Customer count & list queries
     if (lower.includes('kitne customer') || lower.includes('how many customer') || lower.includes('total customer') || raw.includes('कितने ग्राहक') || raw.includes('कितने कस्टमर')) {
       const count = allCustomers.length;
       return formatLocalizedResponse(userLang, {
-        hindi: `आपके नोटीबुक में कुल ${count} ग्राहक जुड़े हुए हैं।`,
-        hinglish: `Aapke NotiBook me total ${count} customers registered hain.`,
+        hindi: `नोटीबुक में कुल ${count} ग्राहक जुड़े हुए हैं।`,
+        hinglish: `NotiBook me total ${count} customers registered hain.`,
         english: `You currently have ${count} customers registered in your NotiBook.`,
       });
     }
 
-    // 11. Gratitude & Greetings
+    // 12. Gratitude & Greetings
     if (lower.includes('thank') || lower.includes('dhanyawad') || lower.includes('shukriya') || raw.includes('धन्यवाद') || raw.includes('शुक्रिया')) {
       return formatLocalizedResponse(userLang, {
         hindi: 'आपका स्वागत है! किसी भी अन्य हिसाब या बिलिंग के लिए मुझे बताइए।',
-        hinglish: 'You are welcome! Aur kuch hisab ya bill check karna ho toh bataiye.',
-        english: 'You are welcome! Let me know if you need any other ledger, billing, or customer updates.',
+        hinglish: 'You are welcome! Aur kuch update karna ho toh bataiye.',
+        english: 'You are welcome! Let me know if you need anything else.',
       });
     }
 
@@ -505,15 +689,15 @@ export class GeminiLiveManager {
       return formatLocalizedResponse(userLang, {
         hindi: 'नमस्ते! आज मैं आपकी दुकान और खाते में क्या मदद करूँ?',
         hinglish: 'Namaste! Aaj aapke shop aur ledger me kya check karna hai?',
-        english: 'Hello! How can I assist you with your shop ledger, customers, or billing today?',
+        english: 'Hello! How can I assist you with your shop ledger or customers today?',
       });
     }
 
-    // Contextual open response
+    // 13. Clean, direct conversational default - strictly no canned capability paragraphs
     return formatLocalizedResponse(userLang, {
-      hindi: 'जी, मैं समझ गया। आप किसी भी ग्राहक का बैलेंस पूछ सकते हैं, नया लेनदेन दर्ज कर सकते हैं, या बिलिंग खोल सकते हैं।',
-      hinglish: 'Main samajh gaya. Aap kisi bhi customer ka balance puch sakte hain, payment entry kar sakte hain, ya billing open kar sakte hain.',
-      english: 'Understood. You can ask for customer balances, record transactions, view sales summaries, or open pages.',
+      hindi: 'जी बताइए, क्या एंट्री करनी है?',
+      hinglish: 'Haanji, batayein, ledger me kya update karna hai?',
+      english: 'Yes, what would you like to update in your ledger?',
     });
   }
 

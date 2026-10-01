@@ -83,3 +83,22 @@ export async function deleteTransactionApi(id: string): Promise<boolean> {
     return true;
   }
 }
+
+export async function updateTransactionApi(id: string, updates: Partial<Transaction>): Promise<Transaction | null> {
+  try {
+    const res = await apiRequest<{ transaction: Transaction }>(`/api/transactions/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+    return res.transaction;
+  } catch {
+    const all = await fetchTransactions();
+    const target = all.find(t => t.id === id);
+    if (!target) return null;
+    const updatedTx: Transaction = { ...target, ...updates };
+    const updatedList = all.map(t => t.id === id ? updatedTx : t);
+    localStorage.setItem('notibook_transactions', JSON.stringify(updatedList));
+    return updatedTx;
+  }
+}
+

@@ -206,15 +206,21 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
               </span>
               <div className="flex flex-wrap gap-1">
                 {[
+                  'एक रमेश सा कस्टमर',
+                  'Add Ramesh as customer',
                   'राहुल करके कस्टमर बनाओ',
                   'रवि का बैलेंस बताओ',
-                  'कस्टमर्स खोलो',
                   'Ravi ka balance batao',
                   'Usmein 500 add kar do',
                   'Ravi ki last transaction delete karo',
+                  'Total udhar kitna hai?',
+                  'कस्टमर्स खोलो',
+                  'Billing page kholo',
+                  'दुकान की सेटिंग खोलो',
+                  'नया ग्राहक जोड़ने का फॉर्म खोलो',
+                  'Open search bar',
+                  'रवि का लेजर खोलो',
                   'Aaj kitna paisa aaya?',
-                  'Add Ramesh as customer',
-                  'Show me today report',
                 ].map((phrase, i) => (
                   <button
                     key={i}

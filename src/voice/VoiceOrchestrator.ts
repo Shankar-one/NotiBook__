@@ -48,6 +48,40 @@ export class VoiceOrchestrator {
     });
 
     this.initSpeechRecognition();
+    this.initUserGestureUnblocking();
+  }
+
+  /**
+   * Unblocks audio context and speech recognition on first user interaction,
+   * ensuring browser audio and microphone permissions are unlocked.
+   */
+  private initUserGestureUnblocking() {
+    if (typeof window === 'undefined') return;
+
+    const unblock = () => {
+      console.log('[VoiceOrchestrator] User gesture detected: unblocking audio & mic recognition');
+      try {
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioContextClass) {
+          const ctx = new AudioContextClass();
+          if (ctx.state === 'suspended') {
+            ctx.resume();
+          }
+        }
+      } catch {}
+
+      try {
+        this.wakeWordManager.start();
+      } catch {}
+
+      window.removeEventListener('click', unblock);
+      window.removeEventListener('keydown', unblock);
+      window.removeEventListener('touchstart', unblock);
+    };
+
+    window.addEventListener('click', unblock, { once: true });
+    window.addEventListener('keydown', unblock, { once: true });
+    window.addEventListener('touchstart', unblock, { once: true });
   }
 
   private setState(state: VoiceState) {

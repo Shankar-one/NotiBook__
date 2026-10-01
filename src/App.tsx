@@ -118,21 +118,62 @@ export default function App() {
     localStorage.setItem('notibook_invoices', JSON.stringify(invoices));
   }, [invoices]);
 
+  // Refs for callbacks
+  const customersRef = React.useRef(customers);
+  customersRef.current = customers;
+  const invoicesRef = React.useRef(invoices);
+  invoicesRef.current = invoices;
+
   // Wire VoiceSessionManager with React state & router
   useEffect(() => {
     voiceSession.setActionCallbacks({
-      onNavigate: (page) => {
-        if (page === 'home') setActiveTab('home');
-        else if (page === 'customers') setActiveTab('customers');
-        else if (page === 'billing') {
+      onNavigate: (target: string, options?: { customerName?: string; transactionType?: string }) => {
+        const t = target.toLowerCase();
+        
+        // 1. Core pages / subtabs
+        if (t === 'home' || t === 'dashboard') {
+          setActiveTab('home');
+        } else if (t === 'customers' || t === 'parties' || t === 'khata') {
+          setActiveTab('customers');
+        } else if (t === 'billing' || t === 'invoices') {
           setActiveTab('book');
           setActiveBookSubtab('billing');
-        } else if (page === 'transactions') {
+        } else if (t === 'transactions' || t === 'passbook' || t === 'daybook') {
           setActiveTab('book');
           setActiveBookSubtab('transactions');
-        } else if (page === 'stocks') {
+        } else if (t === 'stocks' || t === 'inventory' || t === 'products') {
           setActiveTab('book');
           setActiveBookSubtab('stocks');
+        } 
+        // 2. Modals and smaller things
+        else if (t.includes('add_customer') || t === 'customer_modal' || t === 'new_customer') {
+          setIsAddCustomerOpen(true);
+        } else if (t.includes('add_transaction') || t === 'transaction_modal' || t === 'cash_in' || t === 'cash_out') {
+          const type = options?.transactionType === 'credit' || options?.transactionType === 'in' || t === 'cash_in' ? 'in' : (options?.transactionType === 'debit' || options?.transactionType === 'out' || t === 'cash_out' ? 'out' : undefined);
+          setAddTxConfig({ defaultType: type });
+          setIsAddTxOpen(true);
+        } else if (t.includes('add_product') || t === 'product_modal' || t === 'new_product') {
+          setIsAddProductOpen(true);
+        } else if (t.includes('ledger') || t.includes('customer_ledger')) {
+          const currentCustomers = customersRef.current;
+          if (options?.customerName) {
+            const found = currentCustomers.find(c => c.name.toLowerCase().includes(options.customerName!.toLowerCase()));
+            if (found) setSelectedCustomerForLedger(found);
+            else if (currentCustomers.length > 0) setSelectedCustomerForLedger(currentCustomers[0]);
+          } else if (currentCustomers.length > 0) {
+            setSelectedCustomerForLedger(currentCustomers[0]);
+          }
+        } else if (t.includes('invoice') || t.includes('bill_modal') || t.includes('receipt')) {
+          const currentInvoices = invoicesRef.current;
+          setViewingInvoice(currentInvoices[0] || sampleInvoices[0]);
+        } else if (t.includes('setting')) {
+          setIsSettingsOpen(true);
+        } else if (t.includes('search')) {
+          setIsSearchOpen(true);
+        } else if (t.includes('voice')) {
+          setIsVoiceOpen(true);
+        } else if (t.includes('sidebar')) {
+          setCollapsedSidebar(prev => !prev);
         }
       },
       onCustomerUpdated: (cust) => {

@@ -57,3 +57,22 @@ export async function deleteReminderApi(id: string): Promise<boolean> {
     return true;
   }
 }
+
+export async function updateReminderApi(id: string, updates: Partial<Reminder>): Promise<Reminder | null> {
+  try {
+    const res = await apiRequest<{ reminder: Reminder }>(`/api/reminders/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+    return res.reminder;
+  } catch {
+    const all = await fetchReminders();
+    const target = all.find(r => r.id === id);
+    if (!target) return null;
+    const updatedRem: Reminder = { ...target, ...updates };
+    const updatedList = all.map(r => r.id === id ? updatedRem : r);
+    localStorage.setItem('notibook_reminders', JSON.stringify(updatedList));
+    return updatedRem;
+  }
+}
+

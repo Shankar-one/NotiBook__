@@ -31,16 +31,10 @@ export class SpeechWakeWordProvider implements WakeWordProvider {
       this.recognition.onresult = (event: any) => {
         for (let i = event.resultIndex; i < event.results.length; ++i) {
           const transcript = event.results[i][0].transcript.toLowerCase().trim();
-          // Detect "hey jarvis", "jarvis", "okay jarvis", "hi jarvis"
-          if (
-            transcript.includes('hey jarvis') ||
-            transcript.includes('hay jarvis') ||
-            transcript.includes('a jarvis') ||
-            transcript.includes('ok jarvis') ||
-            transcript.includes('okay jarvis') ||
-            transcript.includes('jarvis')
-          ) {
-            console.log('[WakeWord] Wake word detected: "Hey Jarvis"');
+          // Detect "hey jarvis", "hi jarvis", "ok jarvis", "jarvis", "जार्विस", "हे जार्विस"
+          const wakeWordRegex = /\b(hey\s+jarvis|hay\s+jarvis|hi\s+jarvis|hello\s+jarvis|ok\s+jarvis|okay\s+jarvis|oye\s+jarvis|ae\s+jarvis|a\s+jarvis|sun\s+jarvis|suno\s+jarvis|jarvis)\b|जार्विस|हे\s*जार्विस|हाय\s*जार्विस|सुनो\s*जार्विस|जारविस/i;
+          if (wakeWordRegex.test(transcript)) {
+            console.log('[WakeWord] Wake word detected: "Hey Jarvis" from transcript:', transcript);
             this.notifyDetected();
             break;
           }
