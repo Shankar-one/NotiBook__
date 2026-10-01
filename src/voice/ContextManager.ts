@@ -133,9 +133,30 @@ export class ContextManager {
     }
 
     // Fall back to active customer if query has action without explicit name
-    if (this.context.activeCustomer && (text.includes('balance') || text.includes('add') || text.includes('de do') || text.includes('batao') || text.includes('last'))) {
+    if (this.context.activeCustomer && (text.includes('balance') || text.includes('add') || text.includes('de do') || text.includes('batao') || text.includes('last') || text.includes('उधर') || text.includes('उधार') || text.includes('लिख'))) {
       const active = knownCustomers.find((c) => c.id === this.context.activeCustomer?.id);
       if (active) return { customer: active };
+    }
+
+    // 3. Extract named customer pattern even if not yet in knownCustomers
+    const nameMatch = input.match(/(?:^|अरे|जार्विस|भाई|सुनो|please|hey\s+jarvis)?\s*([a-zA-Z\s\u0900-\u097F]+?)\s*(?:के|की|का|ke|ki|ka)\s*(?:अकाउंट|खाते|खाता|account|khata|name|naam)?\s*(?:में|पे|पर|mein|me)/i) ||
+                      input.match(/(?:^|अरे|जार्विस|भाई|सुनो|please|hey\s+jarvis)?\s*([a-zA-Z\s\u0900-\u097F]+?)\s*(?:को|se|से|pe|पे|पर)\s*(?:₹|\d+|उधर|उधार|जमा)/i);
+    if (nameMatch && nameMatch[1]) {
+      let extracted = nameMatch[1].replace(/^(hey\s+jarvis|jarvis|bhai|are|sun|suno|please|zara|ek|naya|new)\s*/i, '').trim();
+      extracted = extracted.replace(/[0-9₹,\.]+/g, '').trim();
+      const reserved = ['account', 'khata', 'customer', 'grahak', 'khatabook', 'entry', 'balance', 'अकाउंट', 'खाता', 'खाते', 'कस्टमर', 'ग्राहक', 'एंट्री', 'उधार', 'उधर', 'जमा', 'uske', 'usmein'];
+      if (extracted.length >= 2 && !reserved.includes(extracted.toLowerCase())) {
+        const adhocCustomer: Customer = {
+          id: `cust-${Date.now()}`,
+          name: extracted,
+          phone: '+91 98000 00000',
+          balance: 0,
+          lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+          status: 'settled',
+          createdAt: new Intl.DateTimeFormat('en-CA').format(new Date()),
+        };
+        return { customer: adhocCustomer };
+      }
     }
 
     return {};

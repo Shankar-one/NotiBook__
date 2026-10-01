@@ -1,3 +1,4 @@
+import { AudioManager } from './AudioManager';
 import { VoiceOrchestrator } from './VoiceOrchestrator';
 import { VoiceState, ConversationTurn } from './types';
 import { ActionRouterCallbacks } from './ActionRouter';
@@ -87,6 +88,9 @@ export class VoiceSessionManager {
   }
 
   public async start(): Promise<void> {
+    if (this.getState() !== 'IDLE' && this.getState() !== 'ERROR') {
+      return;
+    }
     await this.orchestrator.startActiveSession('Yes? Main sun raha hoon.');
   }
 
@@ -96,6 +100,18 @@ export class VoiceSessionManager {
 
   public async toggle(): Promise<void> {
     await this.orchestrator.toggleSession();
+  }
+
+  public async checkMicPermission(): Promise<'granted' | 'denied' | 'prompt'> {
+    return AudioManager.checkPermission();
+  }
+
+  public async requestMicPermission(): Promise<{ granted: boolean; error?: string }> {
+    const res = await AudioManager.requestPermission();
+    if (res.granted && this.getState() === 'ERROR') {
+      await this.stop();
+    }
+    return res;
   }
 
   public async sendManualUtterance(text: string): Promise<void> {

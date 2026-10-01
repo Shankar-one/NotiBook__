@@ -17,6 +17,40 @@ export class AudioManager {
     // Lazy init audio contexts on user interaction
   }
 
+  public static async checkPermission(): Promise<'granted' | 'denied' | 'prompt'> {
+    if (typeof navigator === 'undefined' || !navigator.permissions) {
+      return 'prompt';
+    }
+    try {
+      const status = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+      return status.state as 'granted' | 'denied' | 'prompt';
+    } catch {
+      return 'prompt';
+    }
+  }
+
+  public static async requestPermission(): Promise<{ granted: boolean; error?: string }> {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      return { granted: false, error: 'Microphone is not supported in this browser environment.' };
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
+      // Release stream after confirmation
+      stream.getTracks().forEach((track) => track.stop());
+      return { granted: true };
+    } catch (err: any) {
+      console.warn('[AudioManager] Permission request failed:', err);
+      return { granted: false, error: err.name || err.message };
+    }
+  }
+
   public async startCapture(
     onChunk: (base64Chunk: string) => void,
     onVolume?: (volume: number) => void

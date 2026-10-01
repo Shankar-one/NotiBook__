@@ -128,6 +128,19 @@ export class ActionRouter {
     let customer: Customer | null = null;
     if (customerNameOrId) {
       customer = await getCustomerByIdOrName(customerNameOrId);
+      if (!customer && customerNameOrId !== 'खाता' && customerNameOrId !== 'Customer' && customerNameOrId !== 'New Customer' && customerNameOrId.length >= 2) {
+        try {
+          customer = await createCustomerApi({
+            name: customerNameOrId,
+            balance: 0,
+          });
+          if (this.callbacks.onCustomerUpdated) {
+            this.callbacks.onCustomerUpdated(customer);
+          }
+        } catch (e) {
+          console.warn('Could not auto-create customer:', e);
+        }
+      }
     }
 
     const tx = await addTransactionApi({

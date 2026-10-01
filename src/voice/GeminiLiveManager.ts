@@ -607,41 +607,82 @@ export class GeminiLiveManager {
       });
     }
 
-    // 7. Add transaction intent
-    const addMatch = lower.match(/(?:add|jama|diye|de\s+do|credit|debit)\s*(?:karo|kar\s+do)?/i);
-    const amountMatch = raw.match(/(?:₹|rs\.?|rupaye|rupees)?\s*(\d+)/i);
+    // 7. Robust Multilingual Transaction Intent & Entity Extraction
+    // Handles all patterns in Hindi, Hinglish, English such as:
+    // "कृपा शंकर के अकाउंट में ₹1000 उधर लिख दो"
+    // "सुरेश के खाते में ₹500 उधार लिखो"
+    // "रमेश को 200 दिए"
+    // "Kripa Shankar ke account mein 1000 udhar likh do"
+    // "Add 1000 udhar to Kripa Shankar"
+    const amountMatch = raw.match(/(?:₹|rs\.?|inr|रुपये|रुपए)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:₹|rs\.?|inr|रुपये|रुपए)?/i);
     const hasAmount = !!amountMatch;
-    const amount = hasAmount ? parseFloat(amountMatch[1]) : 0;
+    const amount = hasAmount ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0;
 
-    if (addMatch || lower.includes('add') || lower.includes('aur 200 aur') || lower.includes('de do') || raw.includes('जोड़ो') || raw.includes('जमा')) {
-      const cust = resolvedCust || (this.contextManager.getActiveCustomer() ? allCustomers.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : null);
+    const isDebitIndicator = /\b(udhar|udhari|debit|diya|diye|de\s*do|dedo|dekar|nikasi|gaya)\b|उधर|उधार|उधारी|डेबिट|दिए|दिया|दे\s*दो|देना|काट\s*लो|काटो|माइनस/i.test(raw);
+    const isCreditIndicator = /\b(jama|credit|mila|mili|mile|aaya|aayi|payment|received|jama\s*karo)\b|जमा|क्रेडिट|मिला|मिली|मिले|आया|आई|पेमेंट|पाया/i.test(raw);
+    const isActionVerb = /\b(likh\s*do|likho|likhiye|likh\s*lo|likha|chadha\s*do|chada\s*do|daal\s*do|dalo|add\s*karo|add\s*kar\s*do|add|jo\s*do|jod\s*do|jodo|darj\s*karo|note\s*karo|entry\s*karo|kar\s*do)\b|लिख\s*दो|लिखो|लिखिए|लिख\s*लो|लिखा|चढ़ा\s*दो|चढ़ाओ|डाल\s*दो|डालो|ऐड\s*करो|ऐड\s*कर\s*दो|जोड़ो|जोड़\s*दो|दर्ज\s*करो|दर्ज\s*कर\s*दो|नोट\s*करो|नोट\s*कर\s*दो|एंट्री\s*करो|एंट्री\s*कर\s*दो|कर\s*दो/i.test(raw);
+
+    const isTransactionCommand = (hasAmount && (isDebitIndicator || isCreditIndicator || isActionVerb)) ||
+      lower.includes('add transaction') ||
+      lower.includes('add entry') ||
+      lower.includes('aur 200 aur') ||
+      raw.includes('उधार लिख') ||
+      raw.includes('उधर लिख') ||
+      raw.includes('जमा लिख') ||
+      raw.includes('खाते में') ||
+      raw.includes('अकाउंट में');
+
+    if (isTransactionCommand) {
+      let targetCust = resolvedCust || (this.contextManager.getActiveCustomer() ? allCustomers.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : null);
+      let targetName = targetCust?.name;
+
+      // Extract customer name if not resolved from context or knownCustomers
+      if (!targetName) {
+        const namePatterns = [
+          /(?:^|अरे|जार्विस|भाई|सुनो|please|hey\s+jarvis)?\s*([a-zA-Z\s\u0900-\u097F]+?)\s*(?:के|की|का|ke|ki|ka)\s*(?:अकाउंट|खाते|खाता|account|khata|name|naam)?\s*(?:में|पे|पर|mein|me)/i,
+          /(?:^|अरे|जार्विस|भाई|सुनो|please|hey\s+jarvis)?\s*([a-zA-Z\s\u0900-\u097F]+?)\s*(?:को|se|से|pe|पे|पर)\s*(?:₹|\d+|उधर|उधार|जमा)/i,
+          /(?:to|for|in|naam|नाम|नाम\s*pe|नाम\s*पर)\s+([a-zA-Z\s\u0900-\u097F]+?)(?:'s|\s+ke|\s+के|\s+account|\s+khata|\s+अकाउंट|\s+खाते)?$/i,
+        ];
+        for (const pat of namePatterns) {
+          const match = raw.match(pat);
+          if (match && match[1]) {
+            let extracted = match[1].replace(/^(hey\s+jarvis|jarvis|bhai|are|sun|suno|please|zara|ek|naya|new)\s*/i, '').trim();
+            extracted = extracted.replace(/[0-9₹,\.]+/g, '').trim();
+            const reserved = ['account', 'khata', 'customer', 'grahak', 'khatabook', 'entry', 'balance', 'अकाउंट', 'खाता', 'खाते', 'कस्टमर', 'ग्राहक', 'एंट्री', 'उधार', 'उधर', 'जमा', 'uske', 'usmein'];
+            if (extracted.length >= 2 && !reserved.includes(extracted.toLowerCase())) {
+              targetName = extracted;
+              break;
+            }
+          }
+        }
+      }
 
       if (!hasAmount) {
         this.contextManager.setPendingSlotFilling({
           action: 'add_transaction',
           missingFields: ['amount', 'transaction_type'],
-          gathered: { customerName: cust?.name },
+          gathered: { customerName: targetName },
           promptQuestion: 'Kitne rupaye?',
         });
         return formatLocalizedResponse(userLang, {
-          hindi: 'कितने रुपये जोड़ना है?',
-          hinglish: 'Kitne rupaye?',
-          english: 'How much is the amount?',
+          hindi: `${targetName ? targetName + ' के खाते में ' : ''}कितने रुपये लिखने हैं?`,
+          hinglish: `${targetName ? targetName + ' ke account mein ' : ''}Kitne rupaye likhne hain?`,
+          english: `How much amount to record${targetName ? ' for ' + targetName : ''}?`,
         });
       }
 
-      const isDebit = lower.includes('diye') || lower.includes('debit') || lower.includes('udhar') || lower.includes('de do') || raw.includes('उधार') || raw.includes('दिए');
-      const transactionType = isDebit ? 'debit' : 'credit';
+      // Determine transaction type: udhar/उधर/उधार -> debit, jama/जमा -> credit
+      const transactionType = isDebitIndicator ? 'debit' : 'credit';
 
       const res = await this.actionRouter.addTransaction({
-        customerNameOrId: cust?.name,
+        customerNameOrId: targetName || 'खाता',
         amount,
         transactionType,
         lang: userLang,
       });
 
-      if (cust) {
-        this.contextManager.setActiveCustomer(cust);
+      if (res.customer) {
+        this.contextManager.setActiveCustomer(res.customer);
       }
       this.contextManager.setActiveTransaction({
         id: res.transaction.id,

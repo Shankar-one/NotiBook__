@@ -9,7 +9,6 @@ import { Header } from './components/Header';
 import { HomeDashboard } from './components/HomeDashboard';
 import { CustomersView } from './components/CustomersView';
 import { BookAndLedgerView } from './components/BookAndLedgerView';
-import { VoiceRecordModal } from './components/VoiceRecordModal';
 import { AddCustomerModal } from './components/AddCustomerModal';
 import { AddTransactionModal } from './components/AddTransactionModal';
 import { AddProductModal } from './components/AddProductModal';
@@ -18,6 +17,7 @@ import { InvoicePrintModal } from './components/InvoicePrintModal';
 import { SettingsModal } from './components/SettingsModal';
 import { SearchModal } from './components/SearchModal';
 import { JarvisHUD } from './components/JarvisHUD';
+import { MicrophonePermissionPrompt } from './components/MicrophonePermissionPrompt';
 import { voiceSession } from './voice';
 import { 
   Customer, 
@@ -35,7 +35,6 @@ import {
   sampleProducts, 
   sampleTransactions 
 } from './data/mockData';
-import { ParsedCommandResult } from './utils/aiCommandParser';
 
 export default function App() {
   // Navigation State
@@ -83,7 +82,6 @@ export default function App() {
   });
 
   // Modal States
-  const [isVoiceOpen, setIsVoiceOpen] = useState(false);
   const [isAddCustomerOpen, setIsAddCustomerOpen] = useState(false);
   const [isAddTxOpen, setIsAddTxOpen] = useState(false);
   const [addTxConfig, setAddTxConfig] = useState<{ defaultType?: 'in' | 'out'; defaultCategory?: string }>({});
@@ -171,7 +169,7 @@ export default function App() {
         } else if (t.includes('search')) {
           setIsSearchOpen(true);
         } else if (t.includes('voice')) {
-          setIsVoiceOpen(true);
+          void voiceSession.start();
         } else if (t.includes('sidebar')) {
           setCollapsedSidebar(prev => !prev);
         }
@@ -340,50 +338,6 @@ export default function App() {
     });
   };
 
-  // Voice Command Action Handler
-  const handleApplyVoiceResult = (result: ParsedCommandResult) => {
-    if (result.action === 'add_expense' && result.data?.expenseAmount) {
-      handleAddTransaction({
-        id: `tx-${Date.now()}`,
-        date: new Intl.DateTimeFormat('en-IN', {
-          year: 'numeric',
-          month: '2-digit',
-          day: '2-digit',
-          hour: '2-digit',
-          minute: '2-digit',
-        }).format(new Date()),
-        type: 'out',
-        category: 'Expense',
-        description: result.data.expenseNote || 'Expense logged via voice',
-        paymentMode: 'Cash',
-        amount: result.data.expenseAmount,
-      });
-      setActiveTab('book');
-      setActiveBookSubtab('transactions');
-    } else if (result.action === 'customer_payment' && result.data?.customerName && result.data?.paymentAmount) {
-      const cust = customers.find(c => c.name.toLowerCase().includes(result.data!.customerName!.toLowerCase()));
-      if (cust) {
-        handleCustomerTx(cust.id, 'got', result.data.paymentAmount, 'Payment recorded via Voice Command');
-        setSelectedCustomerForLedger(cust);
-      } else {
-        handleAddTransaction({
-          id: `tx-${Date.now()}`,
-          date: new Intl.DateTimeFormat('en-IN').format(new Date()),
-          type: 'in',
-          category: 'Customer Payment',
-          description: `Payment from ${result.data.customerName}`,
-          paymentMode: 'UPI',
-          amount: result.data.paymentAmount,
-        });
-      }
-      setActiveTab('customers');
-    } else {
-      // Direct user to billing tab where draft is ready
-      setActiveTab('book');
-      setActiveBookSubtab('billing');
-    }
-  };
-
   // WhatsApp Reminder Sender
   const handleSendWhatsappReminder = (customer: Customer) => {
     const text = encodeURIComponent(
@@ -446,7 +400,7 @@ export default function App() {
             setActiveTab(tab);
             setMobileNavOpen(false);
           }}
-          onOpenVoice={() => setIsVoiceOpen(true)}
+          onOpenVoice={() => void voiceSession.start()}
           onOpenSettings={() => setIsSettingsOpen(true)}
           settings={settings}
           collapsed={collapsedSidebar}
@@ -462,7 +416,7 @@ export default function App() {
       >
         {/* Top Header */}
         <Header
-          onOpenVoice={() => setIsVoiceOpen(true)}
+          onOpenVoice={() => void voiceSession.start()}
           onOpenSearch={() => setIsSearchOpen(true)}
           onToggleMobileNav={() => setMobileNavOpen(prev => !prev)}
           isPopulatedState={isPopulatedState}
@@ -484,7 +438,7 @@ export default function App() {
                 setActiveTab(tab);
                 if (subtab) setActiveBookSubtab(subtab);
               }}
-              onOpenVoice={() => setIsVoiceOpen(true)}
+              onOpenVoice={() => void voiceSession.start()}
               onOpenAddCustomer={() => setIsAddCustomerOpen(true)}
               onOpenAddTransaction={(type, cat) => {
                 setAddTxConfig({ defaultType: type, defaultCategory: cat });
@@ -535,14 +489,6 @@ export default function App() {
       </div>
 
       {/* Modals & Dialogs */}
-      <VoiceRecordModal
-        isOpen={isVoiceOpen}
-        onClose={() => setIsVoiceOpen(false)}
-        products={products}
-        customers={customers}
-        onApplyParsedResult={handleApplyVoiceResult}
-      />
-
       <AddCustomerModal
         isOpen={isAddCustomerOpen}
         onClose={() => setIsAddCustomerOpen(false)}
@@ -605,6 +551,9 @@ export default function App() {
           if (subtab) setActiveBookSubtab(subtab);
         }}
       />
+
+      {/* Compulsory Microphone Enablement Prompt */}
+      <MicrophonePermissionPrompt />
 
       {/* Real-time Jarvis Voice Assistant HUD */}
       <JarvisHUD

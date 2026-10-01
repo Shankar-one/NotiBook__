@@ -113,12 +113,25 @@ app.post('/api/transactions', (req, res) => {
   transactions.unshift(newTx);
 
   // Update customer balance if applicable
-  if (partyName) {
+  if (partyName && partyName !== 'खाता' && partyName !== 'Customer') {
     const cust = customers.find(c => c.name.toLowerCase() === partyName.toLowerCase());
     if (cust) {
       const delta = isCredit ? -newTx.amount : newTx.amount;
       cust.balance += delta;
       cust.lastTransactionDate = new Date().toISOString().slice(0, 10);
+    } else {
+      const delta = isCredit ? -newTx.amount : newTx.amount;
+      const newCust = {
+        id: `cust-${Date.now()}`,
+        name: partyName,
+        phone: '+91 98000 00000',
+        address: '',
+        balance: delta,
+        lastTransactionDate: new Date().toISOString().slice(0, 10),
+        status: delta > 0 ? 'due' : 'settled',
+        createdAt: new Date().toISOString().slice(0, 10),
+      };
+      customers.unshift(newCust);
     }
   }
 
@@ -235,6 +248,20 @@ CAPABILITY & LEDGER TOOLS:
 - Reports: get_report (today, week, month sales & expenses)
 - Reminders: add_reminder, get_reminders, update_reminder, delete_reminder
 - Ending Conversation: end_conversation (when the merchant indicates they are done, finished, saying goodbye, or acknowledging with "theek hai", "ok", "bas", "thank you", "bye")
+
+CRITICAL TRANSACTION & KHATA ENTRY INSTRUCTIONS:
+- Whenever the user speaks an entry command like:
+  * "कृपा शंकर के अकाउंट में ₹1000 उधर लिख दो" / "कृपा शंकर के खाते में 1000 उधार लिखो"
+  * "सुरेश को 500 उधार दिए" / "रमेश को 200 दे दो"
+  * "राहुल के खाते में 500 जमा लिखो" / "प्रिया से 1200 पेमेंट आई"
+  * "Kripa Shankar ke account mein 1000 udhar likh do"
+  * "Usmein 500 add kar do" / "उसके खाते में 500 लिख दो"
+  You MUST call 'add_transaction' immediately with:
+  * customer_name: The customer or party name mentioned (e.g. 'कृपा शंकर', 'Ramesh', 'Rahul') or from activeCustomer if pronoun like 'uske khate me'.
+  * amount: The numerical amount in Rupees (e.g. 1000, 500).
+  * transaction_type: 'debit' for udhar/उधार/उधर/given/diye/likh do udhar/debit, 'credit' for jama/जमा/received/mila/payment.
+  * speech_response: Natural confirmation in user language, e.g. "हो गया। कृपा शंकर के खाते में ₹1,000 उधार लिख दिए हैं।"
+  * NEVER reply with a generic question like "जी बताइए, क्या एंट्री करनी है?" when the amount or customer is specified!
 
 CONVERSATION ENDING & CLOSING RULES:
 - When the merchant acknowledges completion, says they are finished, or gives a closing expression (e.g. "theek hai", "theek hai bhai", "ok", "okay", "alright", "bas", "bas itna hi", "that's all", "thank you", "thanks", "bye", "goodbye", "alvida", "ठीक है", "बस"):
@@ -778,18 +805,85 @@ CRITICAL ACTION DECISION FOR ACKNOWLEDGMENTS ("theek hai", "ok", "alright", "bas
     return res.json({ toolCall: { name: 'delete_transaction', args: { customer_name: custName } } });
   }
 
-  // 8. Add transaction
-  const amtMatch = raw.match(/\d+/);
-  if ((lower.includes('add') || lower.includes('de do') || lower.includes('jama') || lower.includes('aur') || raw.includes('जोड़ो') || raw.includes('जमा')) && amtMatch) {
-    const amt = parseFloat(amtMatch[0]);
-    const isDebit = lower.includes('diye') || lower.includes('debit') || lower.includes('udhar') || lower.includes('de do') || raw.includes('उधार') || raw.includes('दिए');
+  // 8. Robust Multilingual Transaction Intent & Entity Extraction
+  const amountMatch = raw.match(/(?:₹|rs\.?|inr|रुपये|रुपए)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:₹|rs\.?|inr|रुपये|रुपए)?/i);
+  const hasAmount = !!amountMatch;
+  const amount = hasAmount ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0;
+
+  const isDebitIndicator = /\b(udhar|udhari|debit|diya|diye|de\s*do|dedo|dekar|nikasi|gaya)\b|उधर|उधार|उधारी|डेबिट|दिए|दिया|दे\s*दो|देना|काट\s*लो|काटो|माइनस/i.test(raw);
+  const isCreditIndicator = /\b(jama|credit|mila|mili|mile|aaya|aayi|payment|received|jama\s*karo)\b|जमा|क्रेडिट|मिला|मिली|मिले|आया|आई|पेमेंट|पाया/i.test(raw);
+  const isActionVerb = /\b(likh\s*do|likho|likhiye|likh\s*lo|likha|chadha\s*do|chada\s*do|daal\s*do|dalo|add\s*karo|add\s*kar\s*do|add|jo\s*do|jod\s*do|jodo|darj\s*karo|note\s*karo|entry\s*karo|kar\s*do)\b|लिख\s*दो|लिखो|लिखिए|लिख\s*लो|लिखा|चढ़ा\s*दो|चढ़ाओ|डाल\s*दो|डालो|ऐड\s*करो|ऐड\s*कर\s*दो|जोड़ो|जोड़\s*दो|दर्ज\s*करो|दर्ज\s*कर\s*दो|नोट\s*करो|नोट\s*कर\s*दो|एंट्री\s*करो|एंट्री\s*कर\s*दो|कर\s*दो/i.test(raw);
+
+  const isTransactionCommand = (hasAmount && (isDebitIndicator || isCreditIndicator || isActionVerb)) ||
+    lower.includes('add transaction') ||
+    lower.includes('add entry') ||
+    lower.includes('aur 200 aur') ||
+    raw.includes('उधार लिख') ||
+    raw.includes('उधर लिख') ||
+    raw.includes('जमा लिख') ||
+    raw.includes('खाते में') ||
+    raw.includes('अकाउंट में');
+
+  if (isTransactionCommand && hasAmount) {
+    let targetName: string | undefined;
+
+    // Check pronouns first (uske, usmein, usko)
+    const isPronoun = /\b(usmein|usme|uske|uska|uski|unke|unka|unhe|unko|isme|ismein|iska|iski|woh|same\s+customer)\b|उसके|उसमें|उसको|उसका|उसकी|उनके|उनका|इसमें|इसका|इसकी/i.test(raw);
+    if (isPronoun && activeCustomer) {
+      targetName = activeCustomer.name;
+    }
+
+    // Match known customer in server memory
+    if (!targetName) {
+      for (const cust of customers) {
+        if (raw.toLowerCase().includes(cust.name.toLowerCase())) {
+          targetName = cust.name;
+          break;
+        }
+      }
+    }
+
+    // Extract customer name pattern from speech
+    if (!targetName) {
+      const namePatterns = [
+        /(?:^|अरे|जार्विस|भाई|सुनो|please|hey\s+jarvis)?\s*([a-zA-Z\s\u0900-\u097F]+?)\s*(?:के|की|का|ke|ki|ka)\s*(?:अकाउंट|खाते|खाता|account|khata|name|naam)?\s*(?:में|पे|पर|mein|me)/i,
+        /(?:^|अरे|जार्विस|भाई|सुनो|please|hey\s+jarvis)?\s*([a-zA-Z\s\u0900-\u097F]+?)\s*(?:को|se|से|pe|पे|पर)\s*(?:₹|\d+|उधर|उधार|जमा)/i,
+        /(?:to|for|in|naam|नाम|नाम\s*pe|नाम\s*पर)\s+([a-zA-Z\s\u0900-\u097F]+?)(?:'s|\s+ke|\s+के|\s+account|\s+khata|\s+अकाउंट|\s+खाते)?$/i,
+      ];
+      for (const pat of namePatterns) {
+        const match = raw.match(pat);
+        if (match && match[1]) {
+          let extracted = match[1].replace(/^(hey\s+jarvis|jarvis|bhai|are|sun|suno|please|zara|ek|naya|new)\s*/i, '').trim();
+          extracted = extracted.replace(/[0-9₹,\.]+/g, '').trim();
+          const reserved = ['account', 'khata', 'customer', 'grahak', 'khatabook', 'entry', 'balance', 'अकाउंट', 'खाता', 'खाते', 'कस्टमर', 'ग्राहक', 'एंट्री', 'उधार', 'उधर', 'जमा', 'uske', 'usmein'];
+          if (extracted.length >= 2 && !reserved.includes(extracted.toLowerCase())) {
+            targetName = extracted;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!targetName) {
+      targetName = custName;
+    }
+
+    const transactionType: 'credit' | 'debit' = isDebitIndicator ? 'debit' : 'credit';
+    const isCredit = transactionType === 'credit';
+    const speech = userLang === 'hindi'
+      ? `हो गया। ${targetName} के खाते में ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'जमा (क्रेडिट)' : 'उधार (डेबिट)'} जोड़ दिए गए हैं।`
+      : (userLang === 'hinglish'
+        ? `Done. ${targetName} ke account mein ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'jama' : 'udhar'} add kar diya.`
+        : `Done. Added ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'credit' : 'debit'} to ${targetName}'s account.`);
+
     return res.json({
       toolCall: {
         name: 'add_transaction',
         args: {
-          customer_name: custName,
-          amount: amt,
-          transaction_type: isDebit ? 'debit' : 'credit',
+          customer_name: targetName,
+          amount,
+          transaction_type: transactionType,
+          speech_response: speech,
         },
       },
     });

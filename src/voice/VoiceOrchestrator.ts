@@ -148,7 +148,13 @@ export class VoiceOrchestrator {
       };
 
       this.recognition.onerror = (e: any) => {
-        if (e.error !== 'no-speech') {
+        if (e.error === 'not-allowed') {
+          console.warn('[VoiceOrchestrator] Microphone permission not allowed');
+          this.setState('ERROR');
+          const errorMsg = 'Microphone access is compulsory. Please allow microphone permission in your browser.';
+          this.events.onJarvisSpokenText?.(errorMsg);
+          this.events.onTranscript?.('assistant', errorMsg);
+        } else if (e.error !== 'no-speech') {
           console.warn('[VoiceOrchestrator] Recognition error:', e.error);
         }
       };
@@ -179,6 +185,11 @@ export class VoiceOrchestrator {
    * Start a continuous voice session
    */
   public async startActiveSession(initialGreeting?: string): Promise<void> {
+    if (this.currentState !== 'IDLE' && this.currentState !== 'ERROR') {
+      console.log('[VoiceOrchestrator] Session already active, ignoring redundant start');
+      return;
+    }
+
     this.audioManager.interruptPlayback();
     this.setState('CONNECTING');
 
@@ -191,7 +202,14 @@ export class VoiceOrchestrator {
         () => {},
         (vol) => this.events.onVolumeChange?.(vol)
       );
-    } catch {}
+    } catch (err: any) {
+      console.warn('[VoiceOrchestrator] Microphone capture failed:', err);
+      this.setState('ERROR');
+      const errorMsg = 'Microphone access is compulsory. Please allow microphone access to talk to Jarvis.';
+      this.events.onJarvisSpokenText?.(errorMsg);
+      this.events.onTranscript?.('assistant', errorMsg);
+      return;
+    }
 
     // Start speech recognition
     this.isContinuousListening = true;
@@ -282,10 +300,24 @@ export class VoiceOrchestrator {
     this.setState('SPEAKING');
     this.events.onJarvisSpokenText?.(text);
 
+    let finished = false;
+    const safetyTimer = setTimeout(() => {
+      if (!finished) {
+        finished = true;
+        if (this.isContinuousListening && this.currentState !== 'IDLE' && this.currentState !== 'ENDING') {
+          this.setState('LISTENING');
+        }
+      }
+    }, 12000);
+
     await this.audioManager.speakText(text, lang, () => {
-      // Once Jarvis finishes speaking, seamlessly resume listening
-      if (this.isContinuousListening) {
-        this.setState('LISTENING');
+      if (!finished) {
+        finished = true;
+        clearTimeout(safetyTimer);
+        // Once Jarvis finishes speaking, seamlessly resume listening
+        if (this.isContinuousListening && this.currentState !== 'IDLE' && this.currentState !== 'ENDING') {
+          this.setState('LISTENING');
+        }
       }
     });
   }
