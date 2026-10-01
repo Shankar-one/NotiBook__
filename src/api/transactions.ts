@@ -1,4 +1,4 @@
-import { Transaction } from '../types';
+import { Transaction, PaymentMethod } from '../types';
 import { apiRequest } from './apiClient';
 import { fetchCustomers } from './customers';
 
@@ -17,7 +17,7 @@ export async function addTransactionApi(tx: {
   partyName?: string;
   amount: number;
   transactionType: 'credit' | 'debit';
-  paymentMode?: 'Cash' | 'UPI' | 'Bank' | 'Credit';
+  paymentMode?: PaymentMethod;
   description?: string;
   category?: Transaction['category'];
 }): Promise<Transaction> {

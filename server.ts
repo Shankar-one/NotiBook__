@@ -51,7 +51,7 @@ let products = [
   { id: 'prod-7', name: 'Fevicol SH Synthetic Adhesive 1kg', category: 'Hardware', stockQty: 24, lowStockThreshold: 10, buyPrice: 220, sellPrice: 280, unit: 'jar', sku: 'HDW-FEV-01' },
 ];
 
-let invoices = [
+let invoices: any[] = [
   {
     id: 'inv-1001',
     invoiceNumber: '#INV-1001',

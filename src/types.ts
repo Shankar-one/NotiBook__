@@ -30,7 +30,7 @@ export interface BillItem {
   productId?: string;
 }
 
-export type PaymentMethod = 'Cash' | 'UPI' | 'Card' | 'Bank Transfer' | 'Cheque' | 'Credit' | 'Other';
+export type PaymentMethod = 'Cash' | 'UPI' | 'Card' | 'Bank Transfer' | 'Bank' | 'Cheque' | 'Credit' | 'Other';
 
 export interface Invoice {
   id: string;

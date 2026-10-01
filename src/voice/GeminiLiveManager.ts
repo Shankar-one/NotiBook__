@@ -429,6 +429,8 @@ export class GeminiLiveManager {
           args.speech_response
         );
         return res.responseText;
+      }
+
       // 8. BILLING & SALE CREATION
       if (name === 'create_sale') {
         const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name || 'Walk-In Customer';
