@@ -4,12 +4,14 @@ import { ConfirmationManager } from './ConfirmationManager';
 import { Customer } from '../types';
 import { fetchCustomers } from '../api/customers';
 import { detectLanguage, UserLanguage, formatLocalizedResponse } from './LanguageUtils';
+import { VoiceState } from './types';
 
 export interface GeminiLiveCallbacks {
-  onStateChange?: (state: 'IDLE' | 'CONNECTING' | 'LISTENING' | 'THINKING' | 'SPEAKING' | 'ERROR') => void;
+  onStateChange?: (state: VoiceState) => void;
   onTranscript?: (role: 'user' | 'assistant', text: string, lang?: UserLanguage) => void;
   onAudioOutput?: (base64Audio: string) => void;
   onError?: (errMessage: string) => void;
+  onEndSession?: (farewellText: string, lang?: UserLanguage) => void;
 }
 
 export class GeminiLiveManager {
@@ -259,6 +261,7 @@ export class GeminiLiveManager {
           message: custName,
           description: custName,
         });
+        this.callbacks.onStateChange?.('WAITING_FOR_CONFIRMATION');
         return args.speech_response || ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
       }
 
@@ -358,6 +361,7 @@ export class GeminiLiveManager {
           message: `${promptDesc}`,
           description: promptDesc,
         });
+        this.callbacks.onStateChange?.('WAITING_FOR_CONFIRMATION');
 
         return args.speech_response || ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
       }
@@ -403,10 +407,19 @@ export class GeminiLiveManager {
           message: args.customer_name || 'Reminder',
           description: args.customer_name ? `${args.customer_name} का रिमाइंडर` : 'रिमाइंडर',
         });
+        this.callbacks.onStateChange?.('WAITING_FOR_CONFIRMATION');
         return args.speech_response || ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
       }
 
-      // 6. NAVIGATION (Tabs, subtabs, and smaller things)
+      // 6. END CONVERSATION
+      if (name === 'end_conversation') {
+        const res = this.actionRouter.endConversation(args.speech_response, userLang);
+        this.callbacks.onStateChange?.('ENDING');
+        this.callbacks.onEndSession?.(res.responseText, userLang);
+        return res.responseText;
+      }
+
+      // 7. NAVIGATION (Tabs, subtabs, and smaller things)
       if (name === 'navigate') {
         const target = args.target || args.page || 'home';
         const res = this.actionRouter.navigate(
@@ -674,6 +687,34 @@ export class GeminiLiveManager {
         hinglish: `NotiBook me total ${count} customers registered hain.`,
         english: `You currently have ${count} customers registered in your NotiBook.`,
       });
+    }
+
+    // Context-aware Closing / Farewell ("theek hai", "ok", "bas", "thank you", "bye", "alvida", "goodbye")
+    // ONLY when NOT waiting for confirmation and NOT in slot filling!
+    const isEndingExpression = 
+      lower === 'theek hai' ||
+      lower === 'theek h' ||
+      lower === 'ok' ||
+      lower === 'okay' ||
+      lower === 'alright' ||
+      lower === 'all right' ||
+      lower === 'bas' ||
+      lower === 'bas itna hi' ||
+      lower === 'that is all' ||
+      lower === 'thats all' ||
+      lower === 'bye' ||
+      lower === 'goodbye' ||
+      lower === 'bye jarvis' ||
+      lower.includes('alvida') ||
+      raw === 'ठीक है' ||
+      raw === 'बस' ||
+      raw === 'अलविदा';
+
+    if (isEndingExpression && !this.contextManager.getPendingConfirmation() && !this.contextManager.getPendingSlotFilling()) {
+      const res = this.actionRouter.endConversation(undefined, userLang);
+      this.callbacks.onStateChange?.('ENDING');
+      this.callbacks.onEndSession?.(res.responseText, userLang);
+      return res.responseText;
     }
 
     // 12. Gratitude & Greetings

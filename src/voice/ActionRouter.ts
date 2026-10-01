@@ -527,4 +527,20 @@ export class ActionRouter {
 
     return { success: true, responseText };
   }
+
+  // 9. End Conversation
+  public endConversation(
+    speechResponse?: string,
+    lang: UserLanguage = 'hinglish'
+  ): { shouldEndSession: true; responseText: string } {
+    const defaultResponse = formatLocalizedResponse(lang, {
+      hindi: 'ठीक है, आपका बहुत धन्यवाद! आपका दिन शुभ हो।',
+      hinglish: 'Theek hai, dhanyawad! Have a great day.',
+      english: 'Alright, thank you! Have a great day.',
+    });
+    return {
+      shouldEndSession: true,
+      responseText: speechResponse && speechResponse.trim() ? speechResponse.trim() : defaultResponse,
+    };
+  }
 }

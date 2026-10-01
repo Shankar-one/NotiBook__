@@ -4,6 +4,8 @@ export type VoiceState =
   | 'LISTENING'
   | 'THINKING'
   | 'SPEAKING'
+  | 'WAITING_FOR_CONFIRMATION'
+  | 'ENDING'
   | 'ERROR';
 
 export interface PendingConfirmation {

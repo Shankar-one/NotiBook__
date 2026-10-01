@@ -234,12 +234,44 @@ CAPABILITY & LEDGER TOOLS:
 - Balances: get_balance (individual customer), get_account_balance (total market receivables across all customers)
 - Reports: get_report (today, week, month sales & expenses)
 - Reminders: add_reminder, get_reminders, update_reminder, delete_reminder
+- Ending Conversation: end_conversation (when the merchant indicates they are done, finished, saying goodbye, or acknowledging with "theek hai", "ok", "bas", "thank you", "bye")
 
-Pronouns like "usmein", "uska", "uski", "woh", "that customer", "the last one" resolve to the currently active customer: ${activeCustomer ? `${activeCustomer.name} (Balance: ₹${activeCustomer.balance})` : 'None'}.`;
+CONVERSATION ENDING & CLOSING RULES:
+- When the merchant acknowledges completion, says they are finished, or gives a closing expression (e.g. "theek hai", "theek hai bhai", "ok", "okay", "alright", "bas", "bas itna hi", "that's all", "thank you", "thanks", "bye", "goodbye", "alvida", "ठीक है", "बस"):
+  * If there is NO pending confirmation or unfinished action: You MUST call 'end_conversation' with a polite, friendly closing farewell in the user's matching language (e.g. "Theek hai, dhanyawad! Have a great day.", "अलविदा! कोई और काम हो तो बताइएगा।", "Alright, thank you! Have a great day."). Do NOT ask "How can I help you" or give generic replies.
+- CRITICAL CONTEXTUAL DISTINCTION:
+  * "Theek hai" / "ok" / "haan" CAN mean confirmation IF Jarvis previously asked for confirmation (e.g. "Confirm karoon?", "Delete karoon?"). If the user is confirming a pending action, execute/confirm the action, do NOT end the conversation!
+  * Only call 'end_conversation' when the merchant is acknowledging completion or closing the conversation.
+
+Pronouns like "usmein", "uska", "uski", "woh", "that customer", "the last one" resolve to the currently active customer: ${activeCustomer ? `${activeCustomer.name} (Balance: ₹${activeCustomer.balance})` : 'None'}.
+
+CURRENT CONVERSATION CONTEXT STATE:
+- Pending confirmation: ${context?.pendingConfirmation ? JSON.stringify(context.pendingConfirmation) : 'NONE'}
+- Pending slot filling: ${context?.pendingSlotFilling ? JSON.stringify(context.pendingSlotFilling) : 'NONE'}
+
+CRITICAL ACTION DECISION FOR ACKNOWLEDGMENTS ("theek hai", "ok", "alright", "bas", "thanks", "bye"):
+- If Pending confirmation is NOT NONE: The user is confirming the pending action. Execute that action now!
+- If Pending confirmation is NONE: The user is acknowledging the previous answer/action and is closing the conversation. You MUST call the 'end_conversation' tool with a friendly farewell in their language! Do NOT ask "how can I help" or reply with text.`;
 
   const tools = [
     {
       functionDeclarations: [
+        // END CONVERSATION
+        {
+          name: 'end_conversation',
+          description: 'Close and end the active voice session when the user indicates the conversation is finished, done, or says goodbye (e.g. theek hai, ok, bas, thank you, bye after an answer). Do NOT call this if user is confirming a pending action or answering slot filling.',
+          parameters: {
+            type: Type.OBJECT,
+            properties: {
+              speech_response: {
+                type: Type.STRING,
+                description: 'Polite natural farewell in the exact language and style used by the merchant',
+              },
+            },
+            required: ['speech_response'],
+          },
+        },
+
         // NAVIGATION (Tabs & smaller things)
         {
           name: 'navigate',
@@ -528,6 +560,31 @@ Pronouns like "usmein", "uska", "uski", "woh", "that customer", "the last one" r
         }
 
         if (response.text && response.text.trim()) {
+          const rawTrim = String(message || '').trim().toLowerCase();
+          const isAcknowledgeClosing = (
+            rawTrim === 'theek hai' || rawTrim === 'theek h' || rawTrim === 'ok' || rawTrim === 'okay' ||
+            rawTrim === 'alright' || rawTrim === 'all right' || rawTrim === 'bas' || rawTrim === 'bas itna hi' ||
+            rawTrim === 'that is all' || rawTrim === 'thats all' || rawTrim === "that's all" ||
+            rawTrim === 'bye' || rawTrim === 'goodbye' || rawTrim === 'thank you' || rawTrim === 'thanks' ||
+            rawTrim === 'thank you jarvis' || rawTrim === 'thanks jarvis' ||
+            message === 'ठीक है' || message === 'बस' || message === 'अलविदा' || message === 'धन्यवाद'
+          );
+
+          // If user gives closing acknowledgment and there is NO pending action, close the conversation
+          if (isAcknowledgeClosing && !context?.pendingConfirmation && !context?.pendingSlotFilling) {
+            const isHindiText = /[\u0900-\u097F]/.test(message || '');
+            const isHinglishText = !isHindiText && /(karo|hai|theek|batao|khatabook|bhai)/i.test(message || '');
+            const farewell = isHindiText
+              ? 'ठीक है, आपका बहुत धन्यवाद! आपका दिन शुभ हो।'
+              : (isHinglishText ? 'Theek hai, dhanyawad! Have a great day.' : 'Alright, thank you! Have a great day.');
+            return res.json({
+              toolCall: {
+                name: 'end_conversation',
+                args: { speech_response: farewell }
+              }
+            });
+          }
+
           return res.json({
             reply: response.text.trim(),
           });
@@ -554,6 +611,38 @@ Pronouns like "usmein", "uska", "uski", "woh", "that customer", "the last one" r
   const userLang: 'hindi' | 'hinglish' | 'english' = isHindi ? 'hindi' : (isHinglish ? 'hinglish' : 'english');
 
   const custName = activeCustomer ? activeCustomer.name : 'Ravi';
+
+  // 0. Context-aware Closing / Farewell ("theek hai", "ok", "bas", "thank you", "bye", "alvida")
+  const isClosingPhrase =
+    lower === 'theek hai' ||
+    lower === 'theek h' ||
+    lower === 'ok' ||
+    lower === 'okay' ||
+    lower === 'alright' ||
+    lower === 'all right' ||
+    lower === 'bas' ||
+    lower === 'bas itna hi' ||
+    lower === 'that is all' ||
+    lower === 'thats all' ||
+    lower === 'bye' ||
+    lower === 'goodbye' ||
+    lower === 'bye jarvis' ||
+    lower.includes('alvida') ||
+    raw === 'ठीक है' ||
+    raw === 'बस' ||
+    raw === 'अलविदा';
+
+  if (isClosingPhrase && !context?.pendingConfirmation && !context?.pendingSlotFilling) {
+    const farewell = userLang === 'hindi'
+      ? 'ठीक है, आपका बहुत धन्यवाद! आपका दिन शुभ हो।'
+      : (userLang === 'hinglish' ? 'Theek hai, dhanyawad! Have a great day.' : 'Alright, thank you! Have a great day.');
+    return res.json({
+      toolCall: {
+        name: 'end_conversation',
+        args: { speech_response: farewell }
+      }
+    });
+  }
 
   // 1. Customer Creation ("एक रमेश सा कस्टमर", "Add Ramesh as customer", "रमेश करके कस्टमर बनाओ", "Add customer")
   const hindiSpecificCustomerMatch = raw.match(/एक\s+([^\s]+)\s+(?:सा\s+)?(?:कस्टमर|ग्राहक)/i);

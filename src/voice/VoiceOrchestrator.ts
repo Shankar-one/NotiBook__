@@ -40,6 +40,12 @@ export class VoiceOrchestrator {
           this.speakAssistantResponse(text, lang);
         }
       },
+      onEndSession: async (farewellText, lang) => {
+        this.setState('ENDING');
+        this.events.onTranscript?.('assistant', farewellText);
+        await this.speakAssistantResponse(farewellText, lang);
+        await this.stopActiveSession();
+      },
     });
 
     this.wakeWordManager = new WakeWordManager();
