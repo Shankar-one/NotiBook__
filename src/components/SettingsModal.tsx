@@ -156,18 +156,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   Default Language
                 </label>
                 <select
-                  value={localStorage.getItem('notibook_preferred_language') || 'auto'}
+                  value={localStorage.getItem('notibook_voice_language_mode') || 'auto'}
                   onChange={(e) => {
                     const val = e.target.value as any;
-                    localStorage.setItem('notibook_preferred_language', val);
+                    localStorage.setItem('notibook_voice_language_mode', val);
                     import('../voice').then(m => m.voiceSession.setLanguage(val));
                   }}
                   className="w-full px-3 py-2 rounded-xl bg-[#FAF7F2] border border-[#EFE9DF] text-xs font-semibold text-[#1E232A] focus:outline-none focus:border-[#E85D43]"
                 >
-                  <option value="auto">Auto-Detect from Voice</option>
-                  <option value="english">English (US / Indian English)</option>
-                  <option value="hinglish">Hinglish (Colloquial)</option>
-                  <option value="hindi">हिन्दी (Devanagari)</option>
+                  <option value="auto">Auto-Detect (English &amp; Hindi)</option>
+                  <option value="english">English Voice</option>
+                  <option value="hindi">हिन्दी Voice</option>
                 </select>
               </div>
 

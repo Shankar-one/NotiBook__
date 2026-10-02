@@ -8,6 +8,7 @@ import { WebSocketServer } from 'ws';
 import { SemanticActionPlanner, DatabaseSnapshot } from './src/voice/SemanticActionPlanner';
 import { cleanExtractedCustomerName, FORBIDDEN_CUSTOMER_PHRASES } from './src/voice/CustomerResolver';
 import { SemanticActionPlan, ExecutionResult } from './src/voice/types';
+import { detectLanguage, toDevanagariForHindiTTS, prepareEnglishForTTS } from './src/voice/LanguageUtils';
 
 dotenv.config();
 
@@ -547,9 +548,11 @@ const planner = new SemanticActionPlanner(apiKey);
 function generateTruthfulResponse(
   plan: SemanticActionPlan,
   results: any[],
-  lang: 'hindi' | 'hinglish' | 'english',
+  rawLang: 'hindi' | 'hinglish' | 'english',
   targetCustomer?: any
 ): string {
+  const lang: 'hindi' | 'hinglish' | 'english' = rawLang === 'english' ? 'english' : 'hindi';
+
   // If plan has clarification question, return it
   if (plan.clarificationQuestion && results.length === 0) {
     return plan.clarificationQuestion;
@@ -773,13 +776,91 @@ CRITICAL RULES:
   }
 });
 
+// Automatic Multilingual Voice TTS Endpoint (English -> English Voice, Hindi -> Hindi Voice)
+app.post('/api/voice/tts', async (req, res) => {
+  try {
+    const { text, lang } = req.body;
+    const rawText = String(text || '').trim();
+    if (!rawText) {
+      return res.status(400).json({ error: 'Text is required' });
+    }
+
+    const detected = (lang === 'english' || lang === 'hindi') ? lang : detectLanguage(rawText);
+    const isHindi = detected !== 'english' || /[\u0900-\u097F]/.test(rawText);
+    const spokenText = isHindi ? toDevanagariForHindiTTS(rawText) : prepareEnglishForTTS(rawText);
+    const targetTl = isHindi ? 'hi' : 'en';
+
+    // 1. Primary: Native language neural TTS (hi-IN voice for Hindi, en-US voice for English)
+    try {
+      const ttsUrl = `https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=${targetTl}&dt=t&q=${encodeURIComponent(spokenText.slice(0, 200))}`;
+      const ttsRes = await fetch(ttsUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+      });
+      if (ttsRes.ok) {
+        const arrayBuffer = await ttsRes.arrayBuffer();
+        if (arrayBuffer.byteLength > 200) {
+          const base64Audio = Buffer.from(arrayBuffer).toString('base64');
+          return res.json({
+            audioData: base64Audio,
+            mimeType: 'audio/mpeg',
+            lang: isHindi ? 'hi-IN' : 'en-US',
+            spokenText,
+          });
+        }
+      }
+    } catch (gErr: any) {
+      console.warn('[TTS] Neural TTS fetch warning:', gErr.message || gErr);
+    }
+
+    // 2. Fallback: Gemini 3.8 Flash Lite TTS
+    if (ai) {
+      try {
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.8-flash-lite-tts',
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: spokenText }],
+            },
+          ],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: isHindi ? 'Kore' : 'Puck' },
+              },
+            },
+          },
+        });
+        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (base64Audio) {
+          return res.json({
+            audioData: base64Audio,
+            mimeType: 'audio/wav',
+            lang: isHindi ? 'hi-IN' : 'en-US',
+            spokenText,
+          });
+        }
+      } catch (aiErr: any) {
+        console.warn('[TTS] Gemini TTS fallback warning:', aiErr.message || aiErr);
+      }
+    }
+
+    return res.status(503).json({ error: 'Server TTS unavailable' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'TTS error' });
+  }
+});
+
 app.post('/api/voice/chat', async (req, res) => {
   const { message, context, userLanguage } = req.body;
   const rawMessage = String(message || '').trim();
 
   if (!rawMessage) {
     return res.json({
-      reply: userLanguage === 'hindi' ? 'जी, मैं सुन रहा हूँ।' : 'Yes, I am listening.',
+      reply: userLanguage === 'english' ? 'Yes, I am listening.' : 'हाँ, मैं सुन रहा हूँ।',
       actions: [],
     });
   }
@@ -793,9 +874,10 @@ app.post('/api/voice/chat', async (req, res) => {
     totalReceivables,
   };
 
-  // 2. Generate Semantic Action Plan
+  // 2. Generate Semantic Action Plan & Auto-Detect Language (Hindi vs English)
+  const autoDetectedLang = detectLanguage(rawMessage);
   const plan = await planner.plan(rawMessage, context || { recentTurns: [] }, dbSnapshot);
-  const userLang = plan.detectedLanguage || userLanguage || 'hinglish';
+  const userLang: 'hindi' | 'hinglish' | 'english' = autoDetectedLang === 'english' && plan.detectedLanguage === 'english' ? 'english' : (autoDetectedLang === 'hindi' ? 'hindi' : (plan.detectedLanguage === 'english' ? 'english' : 'hindi'));
 
   console.log(`[SemanticEngine] Utterance: "${rawMessage}" => Intent: [${plan.primaryIntent}], Actions: ${plan.actions.length}, Language: [${userLang}]`);
 

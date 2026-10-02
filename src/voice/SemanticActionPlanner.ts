@@ -1,6 +1,7 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import { ConversationContext, SemanticActionPlan, PlannedAction } from './types';
-import { FORBIDDEN_CUSTOMER_PHRASES, normalizeCustomerName, resolveCustomerAgainstDatabase } from './CustomerResolver';
+import { FORBIDDEN_CUSTOMER_PHRASES, normalizeCustomerName, resolveCustomerAgainstDatabase, cleanExtractedCustomerName } from './CustomerResolver';
+import { detectLanguage } from './LanguageUtils';
 
 export interface DatabaseSnapshot {
   customers: Array<{ id: string; name: string; balance: number; phone?: string }>;
@@ -126,8 +127,9 @@ CRITICAL ARCHITECTURAL CONSTRAINTS:
    - If required info is missing (e.g. "Ramesh ne payment ki" without amount), ask: "Kitne rupaye receive hue?".
 
 7. LANGUAGE:
-   - Detect user language: "hindi" | "hinglish" | "english".
-   - Clarifications and questions MUST be in the user's detected language.
+   - Detect user language automatically: "hindi" | "english".
+   - If the user speaks in Hindi (whether in Devanagari script OR Hindi words in Roman script like "Amit Verma ka balance batao" or "Prince karke customer banaen"), set detectedLanguage to "hindi" and write any clarificationQuestion in Hindi (Devanagari script).
+   - If the user speaks in English (e.g. "What is Amit Verma's balance?", "Create customer Prince"), set detectedLanguage to "english" and write any clarificationQuestion in English.
 
 Output strictly valid JSON matching the requested schema.`;
 
@@ -267,10 +269,8 @@ Analyze semantic meaning, resolve references, plan sequential actions, and outpu
   ): SemanticActionPlan {
     const lower = raw.toLowerCase().trim();
 
-    // 1. Language Detection
-    const isHindi = /[\u0900-\u097F]/.test(raw);
-    const isHinglish = !isHindi && /\b(karo|karke|banao|batao|bataiye|diya|diye|liya|liye|hoga|hogi|honge|raha|rahi|rahe|kholo|dikhao|paisa|paise|rupaye|udhar|jama|mera|meri|mere|uska|uski|usmein|usme|kya|kitna|kitne|bhai|hisab|theek|bas|aaj|kal|le chalo|khol do)\b/i.test(lower);
-    const detectedLang: 'hindi' | 'hinglish' | 'english' = isHindi ? 'hindi' : (isHinglish ? 'hinglish' : 'english');
+    // 1. Automatic Language Detection (Hindi vs English)
+    const detectedLang: 'hindi' | 'hinglish' | 'english' = detectLanguage(raw);
 
     // 2. Closing / End of Conversation
     const isClosing = 
@@ -650,10 +650,10 @@ Analyze semantic meaning, resolve references, plan sequential actions, and outpu
     }
 
     // Hindi/Hinglish multi-action: "[Name] ko customer banao aur [Amount] udhar likho"
-    const matchHi = lower.match(/([a-zA-Z\u0900-\u097F]+)\s+(?:ko|karke)?\s*(?:naya\s+)?customer\s*bana\s*(?:do|karo)\s+aur\s+(?:uske|usme)?\s*(?:account\s+mein\s+)?(\d+)\s*(?:rupaye|rs)?\s*(?:udhar|likh)/i) ||
-                    lower.match(/customer\s+([a-zA-Z\u0900-\u097F]+)\s+banao\s+aur\s+(\d+)\s*(?:udhar|likh)/i);
+    const matchHi = lower.match(/([a-zA-Z\u0900-\u097F]+)\s+(?:ko|karke|naam\s+se|naam\s+ka)?\s*(?:naya\s+)?(?:customer|grahak|कस्टमर|ग्राहक)\s*(?:bana\s*(?:do|karo)|banao|banaen|banaye|banayein|add\s*karo|jodo|बनाओ|बनाएं|जोड़ो)\s+aur\s+(?:uske|usme)?\s*(?:account\s+mein\s+|khate\s+mein\s+)?(\d+)\s*(?:rupaye|rs)?\s*(?:udhar|likh|add|jod)/i) ||
+                    lower.match(/(?:customer|grahak)\s+([a-zA-Z\u0900-\u097F]+)\s+(?:banao|banaen|banaye)\s+aur\s+(\d+)\s*(?:udhar|likh|add)/i);
     if (matchHi) {
-      const custName = matchHi[1].trim();
+      const custName = cleanExtractedCustomerName(matchHi[1]) || matchHi[1].trim();
       const amount = Number(matchHi[2]);
       return {
         detectedLanguage: detectedLang,
@@ -706,24 +706,28 @@ Analyze semantic meaning, resolve references, plan sequential actions, and outpu
     if (isNavigation) return null;
 
     const createMatch = 
-      lower.match(/^(?:create|add)\s+(?:a\s+)?customer\s+([a-zA-Z\s]+)$/i) ||
-      lower.match(/^(?:create|add)\s+([a-zA-Z\s]+?)\s+(?:as\s+(?:a\s+)?customer|to\s+customers)$/i) ||
-      lower.match(/(?:customer\s+banao|customer\s+add\s+karo|naya\s+customer\s+banao)\s+([a-zA-Z\u0900-\u097F\s]+)/i) ||
-      lower.match(/([a-zA-Z\u0900-\u097F]+?)\s*(?:ko|karke)?\s*(?:naya\s+)?(?:customer|ग्राहक)\s*(?:banao|bana\s*do|add\s*karo|जोड़ो|बनाओ)/i);
+      lower.match(/^(?:create|add|make)\s+(?:a\s+)?(?:new\s+)?(?:customer|party)\s+(?:named\s+|called\s+)?([a-zA-Z\u0900-\u097F\s]+)$/i) ||
+      lower.match(/^(?:create|add)\s+([a-zA-Z\u0900-\u097F\s]+?)\s+(?:as\s+(?:a\s+)?(?:new\s+)?customer|to\s+customers|in\s+customers)$/i) ||
+      lower.match(/(?:customer\s+banao|customer\s+banaen|customer\s+banaye|customer\s+banayein|customer\s+add\s+karo|naya\s+customer\s+banao|naya\s+customer\s+banaen|नया\s+ग्राहक\s+बनाओ|नया\s+कस्टमर\s+बनाएं)\s+([a-zA-Z\u0900-\u097F\s]+)/i) ||
+      lower.match(/([a-zA-Z\u0900-\u097F\s]+?)\s*(?:ko|karke|naam\s+ka|naam\s+se|naam\s+ke|को|करके|नाम\s+का|नाम\s+से)?\s*(?:ek\s+|एक\s+)?(?:naya\s+|new\s+|नया\s+)?(?:customer|grahak|party|कस्टमर|ग्राहक|पार्टी)\s*(?:banao|bana\s*do|banaen|banaye|banayein|banaiye|bana|add\s*karo|add\s*karein|add\s*kar\s*do|add\s*kijiye|jodo|jodein|jodiye|jod\s*do|जोड़ो|जोड़ें|जोड़िए|बनाओ|बनाएं|बनायें|बनाइए|बना\s*दो|ऐड\s*करो|ऐड\s*करें)/i);
 
     if (createMatch && createMatch[1]) {
       const rawName = createMatch[1].trim();
-      const cleanName = rawName.replace(/[^a-zA-Z\u0900-\u097F\s]/g, '').trim();
+      const cleanName = cleanExtractedCustomerName(rawName) || rawName.replace(/[^a-zA-Z\u0900-\u097F\s]/g, '').replace(/\s+(?:karke|ko|naam\s+ka|naam\s+se|naam|naya|new|करके|को|नाम)$/i, '').trim();
       if (cleanName && cleanName.length >= 2 && !FORBIDDEN_CUSTOMER_PHRASES.has(cleanName.toLowerCase())) {
+        // Capitalize first letter of English names nicely
+        const formattedName = /^[a-zA-Z\s]+$/.test(cleanName)
+          ? cleanName.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+          : cleanName;
         return {
           detectedLanguage: detectedLang,
           primaryIntent: 'CREATE_CUSTOMER',
-          userGoalSummary: `Create customer ${cleanName}`,
-          entities: { customerName: cleanName },
+          userGoalSummary: `Create customer ${formattedName}`,
+          entities: { customerName: formattedName },
           references: { isPronounOrReference: false, refersTo: 'none' },
           missingInformation: [],
           ambiguities: [],
-          actions: [{ action: 'CREATE_CUSTOMER', parameters: { customerName: cleanName } }],
+          actions: [{ action: 'CREATE_CUSTOMER', parameters: { customerName: formattedName } }],
         };
       }
     }

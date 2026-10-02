@@ -44,7 +44,7 @@ export class VoiceOrchestrator {
   constructor(actionCallbacks: ActionRouterCallbacks = {}, events: VoiceOrchestratorEvents = {}) {
     this.events = events;
     this.currentLanguagePreference = getStoredLanguagePreference();
-    this.currentVoiceLanguage = this.currentLanguagePreference === 'auto' ? 'hinglish' : this.currentLanguagePreference;
+    this.currentVoiceLanguage = this.currentLanguagePreference === 'english' ? 'english' : 'hindi';
 
     this.audioManager = new AudioManager();
     this.contextManager = new ContextManager();
@@ -152,17 +152,17 @@ export class VoiceOrchestrator {
   public setLanguagePreference(pref: PreferredLanguage) {
     this.currentLanguagePreference = pref;
     setStoredLanguagePreference(pref);
-    if (pref !== 'auto') {
-      this.currentVoiceLanguage = pref;
+    if (pref === 'english') {
+      this.currentVoiceLanguage = 'english';
+    } else if (pref === 'hindi' || pref === 'hinglish') {
+      this.currentVoiceLanguage = 'hindi';
     }
-    // Update recognition language
+    // Update recognition language: en-IN recognizes both English and spoken Hindi words accurately
     if (this.recognition) {
-      if (pref === 'english') {
-        this.recognition.lang = 'en-IN';
-      } else if (pref === 'hindi') {
+      if (pref === 'hindi') {
         this.recognition.lang = 'hi-IN';
       } else {
-        this.recognition.lang = 'hi-IN'; // handles Hinglish and bilingual natural speech
+        this.recognition.lang = 'en-IN';
       }
     }
     this.events.onLanguageChange?.(this.currentVoiceLanguage, pref);
@@ -186,7 +186,7 @@ export class VoiceOrchestrator {
       this.recognition = new SpeechRecognition();
       this.recognition.continuous = true;
       this.recognition.interimResults = true;
-      this.recognition.lang = this.currentLanguagePreference === 'english' ? 'en-IN' : 'hi-IN';
+      this.recognition.lang = this.currentLanguagePreference === 'hindi' ? 'hi-IN' : 'en-IN';
 
       this.recognition.onstart = () => {
         this.isContinuousListening = true;
@@ -223,6 +223,13 @@ export class VoiceOrchestrator {
         if (combined) {
           this.latestHeardText = combined;
           this.events.onInterimTranscript?.(combined);
+
+          // Real-time automatic language detection while user is speaking
+          const liveDetected = detectLanguage(combined, this.currentLanguagePreference);
+          if (liveDetected !== this.currentVoiceLanguage) {
+            this.currentVoiceLanguage = liveDetected;
+            this.events.onLanguageChange?.(liveDetected, this.currentLanguagePreference);
+          }
 
           // Reset silence timer: wait for 2.2 seconds of complete silence after speech ends
           // This allows users to speak compound sentences with natural pauses without being cut off
@@ -364,13 +371,12 @@ export class VoiceOrchestrator {
     }
 
     // User only said "Hey Jarvis":
-    // Announce "Main sun raha hu." in background while the recording feature is ALREADY ACTIVE AND RECORDING!
-    const greetingText = this.currentVoiceLanguage === 'hindi'
-      ? 'हाँ, मैं सुन रहा हूँ।'
-      : (this.currentVoiceLanguage === 'english' ? 'Yes, I am listening.' : 'Main sun raha hu.');
-    this.events.onJarvisSpokenText?.(greetingText, this.currentVoiceLanguage);
-    this.events.onTranscript?.('assistant', greetingText, this.currentVoiceLanguage);
-    void this.audioManager.speakText(greetingText, 'hindi');
+    const isEnglishWake = this.currentVoiceLanguage === 'english' && (!rawTranscript || !/[\u0900-\u097F]/.test(rawTranscript));
+    const greetingLang: UserLanguage = isEnglishWake ? 'english' : 'hindi';
+    const greetingText = isEnglishWake ? 'Yes, I am listening.' : 'हाँ, मैं सुन रहा हूँ।';
+    this.events.onJarvisSpokenText?.(greetingText, greetingLang);
+    this.events.onTranscript?.('assistant', greetingText, greetingLang);
+    void this.audioManager.speakText(greetingText, greetingLang);
   }
 
   /**
@@ -426,7 +432,7 @@ export class VoiceOrchestrator {
     this.isContinuousListening = true;
     if (this.recognition && !this.isRecognizing) {
       try {
-        this.recognition.lang = this.currentLanguagePreference === 'english' ? 'en-IN' : 'hi-IN';
+        this.recognition.lang = this.currentLanguagePreference === 'hindi' ? 'hi-IN' : 'en-IN';
         this.recognition.start();
       } catch (e) {
         console.warn('[VoiceOrchestrator] recognition start warning:', e);
@@ -508,10 +514,9 @@ export class VoiceOrchestrator {
    */
   public async toggleSession(): Promise<void> {
     if (this.currentState === 'IDLE' || this.currentState === 'ERROR') {
-      const greeting = this.currentVoiceLanguage === 'hindi'
-        ? 'हाँ, मैं सुन रहा हूँ।'
-        : (this.currentVoiceLanguage === 'english' ? 'Yes, I am listening.' : 'Main sun raha hu.');
-      await this.startActiveSession(greeting, 'hindi');
+      const isEng = this.currentVoiceLanguage === 'english';
+      const greeting = isEng ? 'Yes, I am listening.' : 'हाँ, मैं सुन रहा हूँ।';
+      await this.startActiveSession(greeting, isEng ? 'english' : 'hindi');
     } else {
       await this.stopActiveSession();
     }
@@ -537,11 +542,11 @@ export class VoiceOrchestrator {
     text = text.replace(/^(hey\s+jarvis|hi\s+jarvis|hello\s+jarvis|ok\s+jarvis|jarvis|हे\s*जार्विस|जार्विस)\s*[,:]?\s*/i, '').trim();
     if (!text) {
       // Just said "Hey Jarvis" during listening
-      const ack = this.currentVoiceLanguage === 'hindi'
-        ? 'हाँ, मैं सुन रहा हूँ।'
-        : (this.currentVoiceLanguage === 'english' ? 'Yes, I am listening.' : 'Main sun raha hu.');
-      this.events.onTranscript?.('assistant', ack, this.currentVoiceLanguage);
-      await this.speakAssistantResponse(ack, 'hindi');
+      const isEng = this.currentVoiceLanguage === 'english';
+      const ack = isEng ? 'Yes, I am listening.' : 'हाँ, मैं सुन रहा हूँ।';
+      const ackLang: UserLanguage = isEng ? 'english' : 'hindi';
+      this.events.onTranscript?.('assistant', ack, ackLang);
+      await this.speakAssistantResponse(ack, ackLang);
       return;
     }
 

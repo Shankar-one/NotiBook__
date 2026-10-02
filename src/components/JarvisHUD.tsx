@@ -272,8 +272,12 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
                     (Speak to interrupt)
                   </span>
                 )}
-                <span className="text-[9px] uppercase px-1.5 py-0.2 rounded-md bg-slate-800 text-slate-300 font-bold border border-slate-700 shrink-0">
-                  {currentLang === 'english' ? 'EN' : (currentLang === 'hindi' ? 'HI' : 'HG')}
+                 <span className="text-[9px] uppercase px-1.5 py-0.2 rounded-md bg-slate-800 text-slate-300 font-bold border border-slate-700 shrink-0">
+                  {langPref === 'auto'
+                    ? `AUTO • ${currentLang === 'english' ? 'EN' : 'HI'}`
+                    : currentLang === 'english'
+                    ? 'EN'
+                    : 'HI'}
                 </span>
               </div>
 
@@ -359,13 +363,23 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
             <div className="flex items-center justify-between gap-1 p-1 bg-slate-900/90 rounded-xl border border-slate-800">
               <span className="text-[10px] font-semibold text-slate-400 pl-2 flex items-center gap-1">
                 <Globe size={11} className="text-[#E85D43]" />
-                <span>Voice Language:</span>
+                <span>Voice Mode:</span>
               </span>
               <div className="flex items-center gap-1">
                 <button
+                  onClick={() => handleSetLanguage('auto')}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                    langPref === 'auto'
+                      ? 'bg-[#E85D43] text-white shadow-xs'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                  }`}
+                >
+                  Auto ({currentLang === 'english' ? 'EN' : 'HI'})
+                </button>
+                <button
                   onClick={() => handleSetLanguage('english')}
                   className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
-                    langPref === 'english' || (langPref === 'auto' && currentLang === 'english')
+                    langPref === 'english'
                       ? 'bg-[#E85D43] text-white shadow-xs'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
                   }`}
@@ -373,19 +387,9 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
                   English
                 </button>
                 <button
-                  onClick={() => handleSetLanguage('hinglish')}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
-                    langPref === 'hinglish' || (langPref === 'auto' && currentLang === 'hinglish')
-                      ? 'bg-[#E85D43] text-white shadow-xs'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                  }`}
-                >
-                  Hinglish
-                </button>
-                <button
                   onClick={() => handleSetLanguage('hindi')}
                   className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
-                    langPref === 'hindi' || (langPref === 'auto' && currentLang === 'hindi')
+                    langPref === 'hindi' || langPref === 'hinglish'
                       ? 'bg-[#E85D43] text-white shadow-xs'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
                   }`}

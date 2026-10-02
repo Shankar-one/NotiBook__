@@ -27,10 +27,11 @@ export const FORBIDDEN_CUSTOMER_PHRASES = new Set([
   'minus karke batao', 'minus karo', 'to khate', 'to khate mein', 'khate mein se', 'khate mein',
   'account mein', 'account mein se', 'usme', 'usmein', 'unke', 'uska', 'iski', 'iske',
   'pay kar di', 'payment kar di', 'receive hua', 'receive hue', 'karke batao', 'bata do',
+  'karke', 'naam', 'naam ka', 'naam se', 'banaen', 'banaye', 'banayein', 'banao', 'jodo', 'jodein',
   'अकाउंट', 'खाता', 'खाते', 'कस्टमर', 'ग्राहक', 'एंट्री', 'बैलेंस', 'उधार', 'उधर', 'जमा',
   'पैसा', 'पैसे', 'रुपये', 'रुपए', 'बताओ', 'दिखाओ', 'खोलो', 'करो', 'दे दो', 'माइनस',
   'माइनस करके बताओ', 'माइनस करो', 'आ चुका है', 'आ गया', 'मिल गया', 'दे दिए', 'खाते में',
-  'खाते में से', 'कम करो', 'पेमेंट कर दी', 'पेज', 'टैब', 'स्क्रीन', 'लिस्ट'
+  'खाते में से', 'कम करो', 'पेमेंट कर दी', 'पेज', 'टैब', 'स्क्रीन', 'लिस्ट', 'करके', 'बनाएं', 'बनाओ'
 ]);
 
 /**
@@ -58,7 +59,7 @@ export function cleanExtractedCustomerName(rawName: string): string {
   text = text.replace(/^(?:अरे|भाई|सुनो|जार्विस|jarvis|hey\s+jarvis|please|zara|ek|naya|new)\s+/i, '');
 
   // Remove trailing prepositions and markers
-  text = text.replace(/(?:\s+(?:ka|ki|ke|ko|se|ne|pe|par|में|पे|पर|का|की|के|को|से|ने))+$/i, '');
+  text = text.replace(/(?:\s+(?:karke|naam\s+ka|naam\s+se|naam\s+ke|naam|ka|ki|ke|ko|se|ne|pe|par|करके|नाम\s+का|नाम\s+से|नाम|में|पे|पर|का|की|के|को|से|ने))+$/i, '');
   text = text.replace(/^(?:se|ko|ne|ka|ki|ke|to|in|for)\s+/i, '');
 
   // Remove transaction/action phrases
@@ -174,8 +175,8 @@ export function resolveCustomerAgainstDatabase(
   if (!isNavigation) {
     const creationMatch = 
       inputLower.match(/(?:add|create)\s+([a-zA-Z\s]+?)\s+(?:as\s+(?:a\s+)?customer|to\s+customers)/i) ||
-      inputLower.match(/(?:customer\s+banao|customer\s+add\s+karo)\s+([a-zA-Z\s]+)/i) ||
-      inputLower.match(/([a-zA-Z\s\u0900-\u097F]+?)\s*(?:ko|karke)?\s*(?:customer|ग्राहक)\s*(?:banao|bana\s*do|add\s*karo|add\s*kar\s*do|जोड़ो|बनाओ|बना\s*दो)/i) ||
+      inputLower.match(/(?:customer\s+banao|customer\s+banaen|customer\s+banaye|customer\s+add\s+karo)\s+([a-zA-Z\s\u0900-\u097F]+)/i) ||
+      inputLower.match(/([a-zA-Z\s\u0900-\u097F]+?)\s*(?:ko|karke|naam\s+ka|naam\s+se|करके|नाम\s+का|नाम\s+से)?\s*(?:naya\s+|नया\s+)?(?:customer|grahak|कस्टमर|ग्राहक)\s*(?:banao|bana\s*do|banaen|banaye|banayein|banaiye|add\s*karo|add\s*karein|add\s*kar\s*do|jodo|jodein|जोड़ो|जोड़ें|बनाओ|बनाएं|बनायें|बनाइए|बना\s*दो)/i) ||
       inputLower.match(/^(?:new\s+customer|naya\s+customer|नया\s+ग्राहक|नया\s+कस्टमर)\s+([a-zA-Z\s\u0900-\u097F]+)/i);
 
     if (creationMatch && creationMatch[1]) {

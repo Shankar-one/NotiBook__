@@ -128,11 +128,9 @@ export class VoiceSessionManager {
       return;
     }
     const curLang = this.getCurrentVoiceLanguage();
-    const greeting = curLang === 'hindi'
-      ? 'हाँ, मैं सुन रहा हूँ।'
-      : (curLang === 'english' ? 'Yes, I am listening.' : 'Main sun raha hu.');
-    // Force Hindi accent for greeting
-    await this.orchestrator.startActiveSession(greeting, 'hindi');
+    const isEnglish = curLang === 'english';
+    const greeting = isEnglish ? 'Yes, I am listening.' : 'हाँ, मैं सुन रहा हूँ।';
+    await this.orchestrator.startActiveSession(greeting, isEnglish ? 'english' : 'hindi');
   }
 
   public async stop(): Promise<void> {

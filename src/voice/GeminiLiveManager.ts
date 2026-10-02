@@ -133,8 +133,14 @@ export class GeminiLiveManager {
         }
 
         const replyText = data.reply && data.reply.trim() ? data.reply.trim() : 'Understood.';
-        this.contextManager.addTurn('assistant', replyText, userLang);
-        this.respond(replyText, userLang);
+        const responseLang: UserLanguage =
+          (data.updatedContext?.detectedLanguage as UserLanguage) ||
+          (data.plan?.detectedLanguage as UserLanguage) ||
+          detectLanguage(replyText) ||
+          userLang;
+        this.currentDetectedLanguage = responseLang;
+        this.contextManager.addTurn('assistant', replyText, responseLang);
+        this.respond(replyText, responseLang);
         return replyText;
       }
     } catch (err: any) {

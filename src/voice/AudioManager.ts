@@ -1,3 +1,5 @@
+import { detectLanguage, toDevanagariForHindiTTS, prepareEnglishForTTS } from './LanguageUtils';
+
 export class AudioManager {
   private mediaStream: MediaStream | null = null;
   private inputAudioCtx: AudioContext | null = null;
@@ -37,6 +39,28 @@ export class AudioManager {
       return this.cachedVoices;
     }
     return [];
+  }
+
+  private async waitForVoices(): Promise<SpeechSynthesisVoice[]> {
+    const existing = this.getVoices();
+    if (existing.length > 0) return existing;
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return [];
+
+    return new Promise((resolve) => {
+      let resolved = false;
+      const done = () => {
+        if (!resolved) {
+          resolved = true;
+          this.cachedVoices = window.speechSynthesis.getVoices();
+          resolve(this.cachedVoices);
+        }
+      };
+      const timer = setTimeout(done, 350);
+      window.speechSynthesis.onvoiceschanged = () => {
+        clearTimeout(timer);
+        done();
+      };
+    });
   }
 
   public static async checkPermission(): Promise<'granted' | 'denied' | 'prompt'> {
@@ -337,19 +361,66 @@ export class AudioManager {
   }
 
   /**
-   * Speak text using Web Speech API synthesis as reliable instant voice layer.
-   * Special instruction requirement: "Main sun raha hu should be hindi accent".
-   * For Hindi/Hinglish speech, selects authentic Hindi/Indian accent voices.
+   * Automatically speaks English text in a natural English voice and Hindi/Hinglish text in a natural Hindi voice.
+   * Uses server-side neural TTS (/api/voice/tts) as primary so Hindi is always spoken by a real Hindi voice
+   * even on systems without local OS Hindi voice packs, with browser SpeechSynthesis as instant fallback.
    */
-  public speakText(
+  public async speakText(
     text: string,
     lang?: 'hindi' | 'hinglish' | 'english' | string,
     onEnd?: () => void
   ): Promise<void> {
-    return new Promise((resolve) => {
-      this.interruptPlayback();
+    this.interruptPlayback();
 
-      if (!('speechSynthesis' in window)) {
+    const rawText = (text || '').trim();
+    if (!rawText) {
+      onEnd?.();
+      return;
+    }
+
+    // Automatically detect whether this utterance is Hindi or English
+    const autoDetected = detectLanguage(rawText);
+    const isDevanagari = /[\u0900-\u097F]/.test(rawText);
+    const isHindi =
+      isDevanagari ||
+      autoDetected === 'hindi' ||
+      autoDetected === 'hinglish' ||
+      (lang === 'hindi' && autoDetected !== 'english');
+
+    const spokenText = isHindi
+      ? toDevanagariForHindiTTS(rawText)
+      : prepareEnglishForTTS(rawText);
+
+    // 1. Primary: Server-side neural voice (/api/voice/tts) for guaranteed native Hindi (hi-IN) & English (en-US) voice
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+      const res = await fetch('/api/voice/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: spokenText,
+          lang: isHindi ? 'hindi' : 'english',
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.audioData) {
+          await this.playDecodedAudioAndWait(data.audioData, onEnd);
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn('[AudioManager] Server TTS unavailable, falling back to browser synthesis:', err);
+    }
+
+    // 2. Fallback: Browser SpeechSynthesis with strict Hindi (hi-IN + Devanagari) vs English (en-US) voice matching
+    const voices = await this.waitForVoices();
+    return new Promise((resolve) => {
+      if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
         onEnd?.();
         resolve();
         return;
@@ -357,88 +428,40 @@ export class AudioManager {
 
       window.speechSynthesis.cancel();
 
-      const voices = this.getVoices();
-      const lowerText = text.toLowerCase().trim();
-
-      // Check if text is "Main sun raha hu" or variants
-      const isMainSunRahaHu = 
-        lowerText.includes('main sun raha') || 
-        lowerText.includes('sun raha hu') || 
-        lowerText.includes('sun raha hoon') ||
-        text.includes('सुन रहा हूँ') ||
-        text.includes('सुन रहा हूं');
-
-      const isDevanagari = /[\u0900-\u097F]/.test(text);
-      const isHindi = lang === 'hindi' || isDevanagari || isMainSunRahaHu;
-      const isEnglish = lang === 'english' && !isDevanagari && !isMainSunRahaHu;
-      const isHinglish = !isHindi && !isEnglish;
-
-      // Find the best voice with Hindi accent
       let chosenVoice: SpeechSynthesisVoice | undefined;
-      let targetLang = 'hi-IN';
-      let spokenUtteranceText = text;
+      let targetLang = isHindi ? 'hi-IN' : 'en-US';
 
-      // Find Hindi native voices
-      const hindiVoice = voices.find(
-        (v) =>
-          v.lang.startsWith('hi') ||
-          v.name.toLowerCase().includes('hindi') ||
-          v.name.toLowerCase().includes('lekha') ||
-          v.name.toLowerCase().includes('kalpana') ||
-          v.name.toLowerCase().includes('swara') ||
-          v.name.toLowerCase().includes('madhur')
-      );
-
-      // Find Indian English voices (natural Indian accent)
-      const indianVoice = voices.find(
-        (v) =>
-          v.lang === 'en-IN' ||
-          v.name.toLowerCase().includes('india') ||
-          v.name.toLowerCase().includes('neerja') ||
-          v.name.toLowerCase().includes('prabhat') ||
-          v.name.toLowerCase().includes('ravi') ||
-          v.name.toLowerCase().includes('heera')
-      );
-
-      if (isMainSunRahaHu) {
-        // "Main sun raha hu should be hindi accent"
-        targetLang = 'hi-IN';
-        if (hindiVoice) {
-          chosenVoice = hindiVoice;
-          // Native Hindi speech engines pronounce Devanagari flawlessly in Hindi accent
-          spokenUtteranceText = 'मैं सुन रहा हूँ।';
-        } else if (indianVoice) {
-          chosenVoice = indianVoice;
-          targetLang = 'en-IN';
-          spokenUtteranceText = 'Main sun raha hu.';
-        } else {
-          // If no specific Hindi/Indian voice, still set lang to hi-IN
-          targetLang = 'hi-IN';
-          spokenUtteranceText = 'मैं सुन रहा हूँ';
-        }
-      } else if (isHindi) {
-        targetLang = 'hi-IN';
-        chosenVoice = hindiVoice || indianVoice;
-      } else if (isHinglish) {
-        // Hinglish uses Indian accent voice
-        targetLang = 'hi-IN';
-        chosenVoice = indianVoice || hindiVoice;
-        if (!chosenVoice) {
-          targetLang = 'en-IN';
-        }
+      if (isHindi) {
+        // Strictly prefer native Hindi (hi-IN) voices — NEVER pick an English (en-IN / en-US) voice for Hindi!
+        chosenVoice =
+          voices.find((v) => v.lang.toLowerCase() === 'hi-in' && v.name.toLowerCase().includes('google')) ||
+          voices.find((v) => v.lang.toLowerCase().startsWith('hi')) ||
+          voices.find(
+            (v) =>
+              v.name.toLowerCase().includes('hindi') ||
+              v.name.includes('हिन्दी') ||
+              v.name.toLowerCase().includes('swara') ||
+              v.name.toLowerCase().includes('madhur') ||
+              v.name.toLowerCase().includes('hemant') ||
+              v.name.toLowerCase().includes('kalpana') ||
+              v.name.toLowerCase().includes('lekha')
+          );
       } else {
-        // English voice
-        targetLang = 'en-US';
-        const engVoice = voices.find(
-          (v) =>
-            v.lang === 'en-IN' || // Prefer clear Indian English if available, or natural US English
-            (v.lang.startsWith('en') && (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Samantha') || v.name.includes('Jenny'))) ||
-            v.lang.startsWith('en')
-        );
-        chosenVoice = engVoice;
+        // Strictly prefer natural English voices for English speech
+        chosenVoice =
+          voices.find(
+            (v) =>
+              (v.lang === 'en-US' || v.lang === 'en-GB' || v.lang === 'en-IN') &&
+              (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Samantha') || v.name.includes('Aria') || v.name.includes('Jenny'))
+          ) ||
+          voices.find((v) => v.lang === 'en-US' || v.lang === 'en-GB') ||
+          voices.find((v) => v.lang.toLowerCase().startsWith('en'));
+        if (chosenVoice?.lang) {
+          targetLang = chosenVoice.lang;
+        }
       }
 
-      const utterance = new SpeechSynthesisUtterance(spokenUtteranceText);
+      const utterance = new SpeechSynthesisUtterance(spokenText);
       utterance.rate = 1.0;
       utterance.pitch = 1.0;
       utterance.lang = targetLang;
@@ -466,6 +489,47 @@ export class AudioManager {
         console.warn('[AudioManager] SpeechSynthesis speak failed:', err);
         finish();
       }
+    });
+  }
+
+  private async playDecodedAudioAndWait(base64Audio: string, onEnd?: () => void): Promise<void> {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!this.outputAudioCtx || this.outputAudioCtx.state === 'closed') {
+      this.outputAudioCtx = new AudioCtx();
+    }
+    if (this.outputAudioCtx.state === 'suspended') {
+      await this.outputAudioCtx.resume();
+    }
+
+    const arrayBuffer = this.base64ToArrayBuffer(base64Audio);
+    const audioBuffer = await this.outputAudioCtx.decodeAudioData(arrayBuffer);
+
+    return new Promise((resolve) => {
+      if (!this.outputAudioCtx) {
+        onEnd?.();
+        resolve();
+        return;
+      }
+      this.isPlaying = true;
+      const sourceNode = this.outputAudioCtx.createBufferSource();
+      sourceNode.buffer = audioBuffer;
+      sourceNode.connect(this.outputAudioCtx.destination);
+
+      let completed = false;
+      const done = () => {
+        if (completed) return;
+        completed = true;
+        this.activeSources = this.activeSources.filter((s) => s !== sourceNode);
+        if (this.activeSources.length === 0) {
+          this.isPlaying = false;
+        }
+        onEnd?.();
+        resolve();
+      };
+
+      sourceNode.onended = done;
+      this.activeSources.push(sourceNode);
+      sourceNode.start(0);
     });
   }
 
