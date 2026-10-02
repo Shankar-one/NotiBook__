@@ -2,12 +2,14 @@ import { AudioManager } from './AudioManager';
 import { VoiceOrchestrator } from './VoiceOrchestrator';
 import { VoiceState, ConversationTurn } from './types';
 import { ActionRouterCallbacks } from './ActionRouter';
+import { UserLanguage, PreferredLanguage } from './LanguageUtils';
 
 export interface VoiceSessionSubscriber {
   onStateChange?: (state: VoiceState) => void;
   onTranscript?: (turn: ConversationTurn) => void;
   onVolumeChange?: (volume: number) => void;
-  onJarvisMessage?: (message: string) => void;
+  onJarvisMessage?: (message: string, lang?: UserLanguage) => void;
+  onLanguageChange?: (lang: UserLanguage, pref: PreferredLanguage) => void;
 }
 
 export class VoiceSessionManager {
@@ -16,8 +18,8 @@ export class VoiceSessionManager {
   private subscribers: Set<VoiceSessionSubscriber> = new Set();
   private transcripts: ConversationTurn[] = [];
   private lastJarvisMessage: string = '';
+  private lastJarvisLang: UserLanguage = 'hinglish';
   private currentVolume: number = 0;
-  private wakeWordActive: boolean = true;
 
   private constructor() {
     this.orchestrator = new VoiceOrchestrator(
@@ -26,8 +28,8 @@ export class VoiceSessionManager {
         onStateChange: (state) => {
           this.subscribers.forEach((s) => s.onStateChange?.(state));
         },
-        onTranscript: (role, text) => {
-          const turn: ConversationTurn = { role, text, timestamp: Date.now() };
+        onTranscript: (role, text, lang) => {
+          const turn: ConversationTurn = { role, text, timestamp: Date.now(), lang };
           this.transcripts.push(turn);
           this.subscribers.forEach((s) => s.onTranscript?.(turn));
         },
@@ -35,9 +37,14 @@ export class VoiceSessionManager {
           this.currentVolume = vol;
           this.subscribers.forEach((s) => s.onVolumeChange?.(vol));
         },
-        onJarvisSpokenText: (text) => {
+        onJarvisSpokenText: (text, lang) => {
           this.lastJarvisMessage = text;
-          this.subscribers.forEach((s) => s.onJarvisMessage?.(text));
+          if (lang) this.lastJarvisLang = lang;
+          this.subscribers.forEach((s) => s.onJarvisMessage?.(text, lang));
+        },
+        onLanguageChange: (lang, pref) => {
+          this.lastJarvisLang = lang;
+          this.subscribers.forEach((s) => s.onLanguageChange?.(lang, pref));
         },
       }
     );
@@ -55,8 +62,8 @@ export class VoiceSessionManager {
       onStateChange: (state) => {
         this.subscribers.forEach((s) => s.onStateChange?.(state));
       },
-      onTranscript: (role, text) => {
-        const turn: ConversationTurn = { role, text, timestamp: Date.now() };
+      onTranscript: (role, text, lang) => {
+        const turn: ConversationTurn = { role, text, timestamp: Date.now(), lang };
         this.transcripts.push(turn);
         this.subscribers.forEach((s) => s.onTranscript?.(turn));
       },
@@ -64,9 +71,14 @@ export class VoiceSessionManager {
         this.currentVolume = vol;
         this.subscribers.forEach((s) => s.onVolumeChange?.(vol));
       },
-      onJarvisSpokenText: (text) => {
+      onJarvisSpokenText: (text, lang) => {
         this.lastJarvisMessage = text;
-        this.subscribers.forEach((s) => s.onJarvisMessage?.(text));
+        if (lang) this.lastJarvisLang = lang;
+        this.subscribers.forEach((s) => s.onJarvisMessage?.(text, lang));
+      },
+      onLanguageChange: (lang, pref) => {
+        this.lastJarvisLang = lang;
+        this.subscribers.forEach((s) => s.onLanguageChange?.(lang, pref));
       },
     });
   }
@@ -75,8 +87,9 @@ export class VoiceSessionManager {
     this.subscribers.add(subscriber);
     // Initial emit
     subscriber.onStateChange?.(this.orchestrator.getState());
+    subscriber.onLanguageChange?.(this.orchestrator.getCurrentVoiceLanguage(), this.orchestrator.getLanguagePreference());
     if (this.lastJarvisMessage) {
-      subscriber.onJarvisMessage?.(this.lastJarvisMessage);
+      subscriber.onJarvisMessage?.(this.lastJarvisMessage, this.lastJarvisLang);
     }
     return () => {
       this.subscribers.delete(subscriber);
@@ -87,11 +100,28 @@ export class VoiceSessionManager {
     return this.orchestrator.getState();
   }
 
+  public getLanguagePreference(): PreferredLanguage {
+    return this.orchestrator.getLanguagePreference();
+  }
+
+  public getCurrentVoiceLanguage(): UserLanguage {
+    return this.orchestrator.getCurrentVoiceLanguage();
+  }
+
+  public setLanguage(pref: PreferredLanguage): void {
+    this.orchestrator.setLanguagePreference(pref);
+  }
+
   public async start(): Promise<void> {
     if (this.getState() !== 'IDLE' && this.getState() !== 'ERROR') {
       return;
     }
-    await this.orchestrator.startActiveSession('Yes? Main sun raha hoon.');
+    const curLang = this.getCurrentVoiceLanguage();
+    const greeting = curLang === 'hindi'
+      ? 'हाँ, मैं सुन रहा हूँ।'
+      : (curLang === 'english' ? 'Yes, I am listening.' : 'Main sun raha hu.');
+    // Force Hindi accent for greeting
+    await this.orchestrator.startActiveSession(greeting, 'hindi');
   }
 
   public async stop(): Promise<void> {
@@ -102,14 +132,25 @@ export class VoiceSessionManager {
     await this.orchestrator.toggleSession();
   }
 
+  public isWakeWordListening(): boolean {
+    return this.orchestrator.isWakeWordListening();
+  }
+
+  public async enableWakeWord(): Promise<void> {
+    await this.orchestrator.enableWakeWord();
+  }
+
   public async checkMicPermission(): Promise<'granted' | 'denied' | 'prompt'> {
     return AudioManager.checkPermission();
   }
 
   public async requestMicPermission(): Promise<{ granted: boolean; error?: string }> {
     const res = await AudioManager.requestPermission();
-    if (res.granted && this.getState() === 'ERROR') {
-      await this.stop();
+    if (res.granted) {
+      await this.enableWakeWord();
+      if (this.getState() === 'ERROR') {
+        await this.stop();
+      }
     }
     return res;
   }

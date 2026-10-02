@@ -45,6 +45,27 @@ export async function createSaleApi(params: {
       // Sync local storage caches
       const savedInvoices = await fetchInvoices();
       localStorage.setItem('notibook_invoices', JSON.stringify([res.invoice, ...savedInvoices.filter(i => i.id !== res.invoice.id)]));
+
+      if (res.customer) {
+        const savedCustomers = await fetchCustomers();
+        const updatedCusts = [res.customer, ...savedCustomers.filter(c => c.id !== res.customer.id && c.name.toLowerCase() !== res.customer.name.toLowerCase())];
+        localStorage.setItem('notibook_customers', JSON.stringify(updatedCusts));
+      }
+
+      if (res.transaction) {
+        const savedTx = JSON.parse(localStorage.getItem('notibook_transactions') || '[]');
+        localStorage.setItem('notibook_transactions', JSON.stringify([res.transaction, ...savedTx.filter((t: any) => t.id !== res.transaction!.id)]));
+      }
+
+      if (res.updatedProducts && res.updatedProducts.length > 0) {
+        const savedProds = await fetchProducts();
+        const updatedProds = savedProds.map(p => {
+          const match = res.updatedProducts.find(up => up.id === p.id);
+          return match || p;
+        });
+        localStorage.setItem('notibook_products', JSON.stringify(updatedProds));
+      }
+
       return res;
     }
   } catch {}

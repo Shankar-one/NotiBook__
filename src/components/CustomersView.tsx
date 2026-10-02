@@ -47,13 +47,21 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
     if (!matchesSearch) return false;
 
     if (filterTab === 'due') return customer.balance > 0;
-    if (filterTab === 'paid') return customer.balance === 0;
-    if (filterTab === 'recent') return true; // could sort by last date
+    if (filterTab === 'paid') return customer.balance <= 0;
+    if (filterTab === 'recent') return true;
     return true;
   });
 
+  const sortedCustomers = [...filteredCustomers].sort((a, b) => {
+    if (filterTab === 'recent') {
+      return (b.lastTransactionDate || '').localeCompare(a.lastTransactionDate || '');
+    }
+    return 0;
+  });
+
   const dueCount = activeCustomers.filter(c => c.balance > 0).length;
-  const paidCount = activeCustomers.filter(c => c.balance === 0).length;
+  const paidCount = activeCustomers.filter(c => c.balance <= 0).length;
+  const recentCount = activeCustomers.filter(c => !!c.lastTransactionDate).length;
   const totalCount = activeCustomers.length;
 
   return (
@@ -141,7 +149,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
                 : 'bg-white text-[#655E57] hover:bg-[#F2ECE2] border border-[#EFE9DF]'
             }`}
           >
-            Recent 1
+            Recent {recentCount > 0 ? recentCount : Math.min(activeCustomers.length, 5)}
           </button>
         </div>
 
@@ -158,7 +166,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
       </div>
 
       {/* Main Content Area */}
-      {filteredCustomers.length === 0 ? (
+      {sortedCustomers.length === 0 ? (
         /* Empty State Card exactly matching Image 2 */
         <div className="bg-white rounded-2xl p-12 sm:p-16 border border-[#EFE9DF] text-center shadow-2xs">
           <div className="flex items-center justify-center w-14 h-14 mx-auto rounded-2xl bg-[#FFEFEA] text-[#E85D43] mb-4">
@@ -181,7 +189,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
       ) : (
         /* Populated Customer Grid / Cards */
         <div className="space-y-3">
-          {filteredCustomers.map((customer) => (
+          {sortedCustomers.map((customer) => (
             <div
               key={customer.id}
               className="bg-white rounded-2xl p-4 sm:p-5 border border-[#EFE9DF] hover:border-[#E85D43]/40 shadow-2xs hover:shadow-xs transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4 group"

@@ -10,18 +10,22 @@ import {
   Calendar,
   Layers
 } from 'lucide-react';
-import { Transaction } from '../types';
+import { Transaction, Invoice } from '../types';
 
 interface TransactionsSubtabProps {
   transactions: Transaction[];
+  invoices?: Invoice[];
   onOpenAddTransaction: () => void;
+  onViewInvoice?: (invoice: Invoice) => void;
   isPopulatedState: boolean;
   onTogglePopulatedState: () => void;
 }
 
 export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
   transactions,
+  invoices = [],
   onOpenAddTransaction,
+  onViewInvoice,
   isPopulatedState,
   onTogglePopulatedState,
 }) => {
@@ -186,7 +190,7 @@ export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
 
           <span className="text-[#A0988F] mx-1">|</span>
 
-          {['all', 'UPI', 'Cash', 'Card', 'Bank', 'Credit'].map((mode) => (
+          {['all', 'UPI', 'Cash', 'Card', 'Bank Transfer', 'Cheque', 'Other'].map((mode) => (
             <button
               key={mode}
               onClick={() => setPaymentFilter(mode)}
@@ -246,37 +250,54 @@ export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#EFE9DF]/60">
-                {filteredTransactions.map((tx) => (
-                  <tr key={tx.id} className="hover:bg-[#FAF7F2]/60 transition-colors">
-                    <td className="py-3.5 px-4 text-[#8C827A] font-medium whitespace-nowrap">
-                      {tx.date}
-                    </td>
-                    <td className="py-3.5 px-4 font-semibold text-[#1E232A]">
-                      <span className={`inline-block px-2 py-0.5 rounded text-[10px] uppercase font-bold tracking-wider ${
-                        tx.type === 'in' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
-                      }`}>
-                        {tx.category}
-                      </span>
-                    </td>
-                    <td className="py-3.5 px-4">
-                      <div className="font-semibold text-[#1E232A]">{tx.description}</div>
-                      {tx.partyName && (
-                        <div className="text-[11px] text-[#8C827A]">{tx.partyName}</div>
-                      )}
-                    </td>
-                    <td className="py-3.5 px-4 text-[#655E57]">
-                      <span className="px-2 py-0.5 rounded-full bg-[#FAF7F2] border border-[#EFE9DF] text-[11px]">
-                        {tx.paymentMode}
-                      </span>
-                    </td>
-                    <td className="py-3.5 px-4 text-right font-bold text-emerald-600 tabular-nums">
-                      {tx.type === 'in' ? `₹${tx.amount.toLocaleString('en-IN')}` : '-'}
-                    </td>
-                    <td className="py-3.5 px-4 text-right font-bold text-rose-600 tabular-nums">
-                      {tx.type === 'out' ? `₹${tx.amount.toLocaleString('en-IN')}` : '-'}
-                    </td>
-                  </tr>
-                ))}
+                {filteredTransactions.map((tx) => {
+                  const matchedInvoice = tx.invoiceId
+                    ? invoices.find(inv => inv.id === tx.invoiceId)
+                    : invoices.find(inv => tx.category === 'Sale' && tx.partyName && inv.customerName.toLowerCase() === tx.partyName.toLowerCase());
+
+                  return (
+                    <tr key={tx.id} className="hover:bg-[#FAF7F2]/60 transition-colors">
+                      <td className="py-3.5 px-4 text-[#8C827A] font-medium whitespace-nowrap">
+                        {tx.date}
+                      </td>
+                      <td className="py-3.5 px-4 font-semibold text-[#1E232A]">
+                        <span className={`inline-block px-2 py-0.5 rounded text-[10px] uppercase font-bold tracking-wider ${
+                          tx.type === 'in' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
+                        }`}>
+                          {tx.category}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-[#1E232A]">{tx.description}</span>
+                          {matchedInvoice && onViewInvoice && (
+                            <button
+                              onClick={() => onViewInvoice(matchedInvoice)}
+                              className="text-[10px] font-bold text-[#E85D43] bg-[#FFEFEA] hover:bg-[#E85D43] hover:text-white px-1.5 py-0.5 rounded transition-colors"
+                              title="View Invoice"
+                            >
+                              View Bill
+                            </button>
+                          )}
+                        </div>
+                        {tx.partyName && (
+                          <div className="text-[11px] text-[#8C827A]">{tx.partyName}</div>
+                        )}
+                      </td>
+                      <td className="py-3.5 px-4 text-[#655E57]">
+                        <span className="px-2 py-0.5 rounded-full bg-[#FAF7F2] border border-[#EFE9DF] text-[11px]">
+                          {tx.paymentMode}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4 text-right font-bold text-emerald-600 tabular-nums">
+                        {tx.type === 'in' ? `₹${tx.amount.toLocaleString('en-IN')}` : '-'}
+                      </td>
+                      <td className="py-3.5 px-4 text-right font-bold text-rose-600 tabular-nums">
+                        {tx.type === 'out' ? `₹${tx.amount.toLocaleString('en-IN')}` : '-'}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

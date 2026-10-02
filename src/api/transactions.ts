@@ -1,15 +1,18 @@
-import { Transaction, PaymentMethod } from '../types';
+import { Transaction, PaymentMethod, Customer } from '../types';
 import { apiRequest } from './apiClient';
 import { fetchCustomers } from './customers';
+import { cleanPartyOrCustomerName } from '../voice/LanguageUtils';
 
 export async function fetchTransactions(): Promise<Transaction[]> {
   try {
     const res = await apiRequest<{ transactions: Transaction[] }>('/api/transactions');
-    return res.transactions;
-  } catch {
-    const saved = localStorage.getItem('notibook_transactions');
-    return saved ? JSON.parse(saved) : [];
-  }
+    if (res?.transactions && Array.isArray(res.transactions)) {
+      localStorage.setItem('notibook_transactions', JSON.stringify(res.transactions));
+      return res.transactions;
+    }
+  } catch {}
+  const saved = localStorage.getItem('notibook_transactions');
+  return saved ? JSON.parse(saved) : [];
 }
 
 export async function addTransactionApi(tx: {
@@ -20,56 +23,92 @@ export async function addTransactionApi(tx: {
   paymentMode?: PaymentMethod;
   description?: string;
   category?: Transaction['category'];
-}): Promise<Transaction> {
+  direction?: 'INCOME' | 'OUTGOING';
+}): Promise<Transaction & { customer?: Customer }> {
+  const cleanParty = cleanPartyOrCustomerName(tx.partyName || '') || tx.partyName;
+  const payload = {
+    ...tx,
+    partyName: cleanParty,
+  };
+
   try {
-    const res = await apiRequest<{ transaction: Transaction }>('/api/transactions', {
+    const res = await apiRequest<{ transaction: Transaction; customer?: Customer }>('/api/transactions', {
       method: 'POST',
-      body: JSON.stringify(tx),
+      body: JSON.stringify(payload),
     });
-    return res.transaction;
-  } catch {
-    const isCredit = tx.transactionType === 'credit';
-    const type: 'in' | 'out' = isCredit ? 'in' : 'out';
+    if (res?.transaction) {
+      const all = await fetchTransactions();
+      const updated = [res.transaction, ...all.filter(t => t.id !== res.transaction.id)];
+      localStorage.setItem('notibook_transactions', JSON.stringify(updated));
 
-    const newTx: Transaction = {
-      id: `tx-${Date.now()}`,
-      date: new Intl.DateTimeFormat('en-IN', {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-      }).format(new Date()),
-      type,
-      category: tx.category || (isCredit ? 'Customer Payment' : 'Expense'),
-      description: tx.description || (isCredit ? `Received ₹${tx.amount}` : `Payment ₹${tx.amount}`),
-      partyName: tx.partyName,
-      paymentMode: tx.paymentMode || 'Cash',
-      amount: tx.amount,
-    };
-
-    const all = await fetchTransactions();
-    const updated = [newTx, ...all];
-    localStorage.setItem('notibook_transactions', JSON.stringify(updated));
-
-    // Also update customer balance if partyName is provided
-    if (tx.partyName) {
-      const customers = await fetchCustomers();
-      const target = customers.find(c => c.name.toLowerCase() === tx.partyName?.toLowerCase());
-      if (target) {
-        // 'credit' means payment received, reduces due balance
-        // 'debit' means goods given on credit, increases due balance
-        const delta = isCredit ? -tx.amount : tx.amount;
-        const updatedBal = target.balance + delta;
-        const updatedCustomers = customers.map(c => 
-          c.id === target.id ? { ...c, balance: updatedBal, lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()) } : c
-        );
-        localStorage.setItem('notibook_customers', JSON.stringify(updatedCustomers));
+      if (res.customer) {
+        const customers = await fetchCustomers();
+        const updatedCusts = [res.customer, ...customers.filter(c => c.id !== res.customer!.id && c.name.toLowerCase() !== res.customer!.name.toLowerCase())];
+        localStorage.setItem('notibook_customers', JSON.stringify(updatedCusts));
       }
+      return { ...res.transaction, customer: res.customer };
     }
+  } catch {}
 
-    return newTx;
+  const isCredit = tx.transactionType === 'credit';
+  const type: 'in' | 'out' = isCredit ? 'in' : 'out';
+
+  const newTx: Transaction = {
+    id: `tx-${Date.now()}`,
+    date: new Intl.DateTimeFormat('en-IN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date()),
+    type,
+    direction: isCredit ? 'INCOME' : 'OUTGOING',
+    category: tx.category || (isCredit ? 'Customer Payment' : 'Expense'),
+    description: tx.description || (isCredit ? `Received ₹${tx.amount} via ${tx.paymentMode || 'Cash'}` : `Payment ₹${tx.amount} via ${tx.paymentMode || 'Cash'}`),
+    partyName: cleanParty,
+    paymentMode: tx.paymentMode || 'Cash',
+    amount: tx.amount,
+    customerId: tx.customerId,
+  };
+
+  const all = await fetchTransactions();
+  const updated = [newTx, ...all];
+  localStorage.setItem('notibook_transactions', JSON.stringify(updated));
+
+  let updatedCust: Customer | undefined;
+  // Also update customer balance if partyName is provided
+  if (cleanParty && cleanParty !== 'खाता' && cleanParty !== 'Customer' && cleanParty.length >= 2) {
+    const customers = await fetchCustomers();
+    const target = customers.find(c => c.name.toLowerCase() === cleanParty.toLowerCase());
+    const delta = isCredit ? -tx.amount : tx.amount;
+    if (target) {
+      const updatedBal = target.balance + delta;
+      updatedCust = {
+        ...target,
+        balance: updatedBal,
+        status: updatedBal > 0 ? 'due' : updatedBal < 0 ? 'advance' : 'settled',
+        lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+      };
+      const updatedCustomers = customers.map(c => c.id === target.id ? updatedCust! : c);
+      localStorage.setItem('notibook_customers', JSON.stringify(updatedCustomers));
+    } else {
+      updatedCust = {
+        id: `cust-${Date.now()}`,
+        name: cleanParty,
+        phone: '+91 98000 00000',
+        address: '',
+        balance: delta,
+        status: delta > 0 ? 'due' : delta < 0 ? 'advance' : 'settled',
+        lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+        createdAt: new Intl.DateTimeFormat('en-CA').format(new Date()),
+      };
+      const updatedCustomers = [updatedCust, ...customers];
+      localStorage.setItem('notibook_customers', JSON.stringify(updatedCustomers));
+    }
   }
+
+  return { ...newTx, customer: updatedCust };
 }
 
 export async function deleteTransactionApi(id: string): Promise<boolean> {

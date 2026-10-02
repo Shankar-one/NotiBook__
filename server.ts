@@ -507,9 +507,17 @@ app.get('/api/reports/summary', (req, res) => {
 
 // --- GEMINI LIVE CONVERSATIONAL VOICE AGENT ENDPOINT ---
 app.post('/api/voice/chat', async (req, res) => {
-  const { message, context, activeCustomer } = req.body;
+  const { message, context, activeCustomer, userLanguage } = req.body;
+
+  const activeLangInstruction = userLanguage === 'english'
+    ? 'CRITICAL: The user has selected English or is speaking in English. Your spoken and written responses (speech_response and reply) MUST be in natural, professional English.'
+    : (userLanguage === 'hindi'
+        ? 'CRITICAL: The user has selected Hindi or is speaking in Hindi. Your responses MUST be in natural Hindi in Devanagari script.'
+        : 'Match the language naturally (English -> English, Hindi -> Hindi, Hinglish -> Hinglish).');
 
   const systemInstruction = `You are Jarvis, the intelligent conversational voice assistant for NotiBook (smart business ledger & Khatabook for Indian merchants).
+
+${activeLangInstruction}
 
 STRICT CONVERSATIONAL & LANGUAGE RULES (Follow strictly on every turn):
 1. English input → natural English response.
@@ -939,7 +947,8 @@ CRITICAL ACTION DECISION FOR ACKNOWLEDGMENTS ("theek hai", "ok", "alright", "bas
     /\b(karo|karke|banao|batao|bataiye|diya|diye|liya|liye|hoga|hogi|honge|raha|rahi|rahe|kholo|dikhao|paisa|paise|rupaye|udhar|jama|mera|meri|mere|tera|teri|tere|uska|uski|usmein|usme|kya|kaun|kaise|kitna|kitne|bhai|khatabook|hisab|dhanyawad|shukriya|namaste|theek|achha|bikri|munafa|kharcha|kharch)\b/i.test(lower) ||
     /\b(kar\s+do|de\s+do|bata\s+do|hata\s+do|bhej\s+do|market\s+me|khata\s+me|dukan\s+me|us\s+me|is\s+me|ka\s+balance|ki\s+last|hai\s+ya|hai\s+kya)\b/i.test(lower)
   );
-  const userLang: 'hindi' | 'hinglish' | 'english' = isHindi ? 'hindi' : (isHinglish ? 'hinglish' : 'english');
+  const detectedLang: 'hindi' | 'hinglish' | 'english' = isHindi ? 'hindi' : (isHinglish ? 'hinglish' : 'english');
+  const userLang: 'hindi' | 'hinglish' | 'english' = (userLanguage === 'english' || userLanguage === 'hindi' || userLanguage === 'hinglish') ? userLanguage : detectedLang;
 
   const custName = activeCustomer ? activeCustomer.name : 'Ravi';
 

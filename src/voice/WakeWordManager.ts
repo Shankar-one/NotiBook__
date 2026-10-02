@@ -2,60 +2,101 @@ import { WakeWordProvider } from './types';
 
 /**
  * Standard Web Speech & Keyword Recognition WakeWord Provider
- * Implements the abstract WakeWordProvider interface so it can be swapped
- * with openWakeWord or custom WASM/ONNX models without touching business logic.
+ * Implements the abstract WakeWordProvider interface with robust auto-recovery,
+ * watchdog monitoring, Indian/English phonetics, and multi-turn coordination.
  */
 export class SpeechWakeWordProvider implements WakeWordProvider {
   public name = 'speech-wakeword-provider';
   private recognition: any = null;
   private isRunning: boolean = false;
+  private isStarting: boolean = false;
+  private isListening: boolean = false;
   private detectedCallbacks: Array<() => void> = [];
   private restartTimeout: any = null;
+  private watchdogInterval: any = null;
+  private lastDetectedTimestamp: number = 0;
 
   constructor() {
     this.initRecognition();
+    this.startWatchdog();
   }
 
   private initRecognition() {
+    if (typeof window === 'undefined') return;
+
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-    if (!SpeechRecognition) return;
+    if (!SpeechRecognition) {
+      console.warn('[WakeWord] Web SpeechRecognition is not supported in this browser');
+      return;
+    }
 
     try {
+      if (this.recognition) {
+        try {
+          this.recognition.abort();
+        } catch {}
+        this.recognition = null;
+      }
+
       this.recognition = new SpeechRecognition();
       this.recognition.continuous = true;
       this.recognition.interimResults = true;
-      this.recognition.lang = 'en-US';
+      // en-IN recognizes both Indian English and Hindi/Hinglish pronunciations of "Jarvis" / "हे जार्विस"
+      this.recognition.lang = 'en-IN';
+
+      this.recognition.onstart = () => {
+        this.isStarting = false;
+        this.isListening = true;
+        console.log('[WakeWord] Wake word listener ACTIVE (Waiting for "Hey Jarvis")');
+      };
 
       this.recognition.onresult = (event: any) => {
         for (let i = event.resultIndex; i < event.results.length; ++i) {
-          const transcript = event.results[i][0].transcript.toLowerCase().trim();
-          // Detect "hey jarvis", "hi jarvis", "ok jarvis", "jarvis", "जार्विस", "हे जार्विस"
-          const wakeWordRegex = /\b(hey\s+jarvis|hay\s+jarvis|hi\s+jarvis|hello\s+jarvis|ok\s+jarvis|okay\s+jarvis|oye\s+jarvis|ae\s+jarvis|a\s+jarvis|sun\s+jarvis|suno\s+jarvis|jarvis)\b|जार्विस|हे\s*जार्विस|हाय\s*जार्विस|सुनो\s*जार्विस|जारविस/i;
-          if (wakeWordRegex.test(transcript)) {
-            console.log('[WakeWord] Wake word detected: "Hey Jarvis" from transcript:', transcript);
-            this.notifyDetected();
-            break;
+          const raw = event.results[i][0].transcript || '';
+          const transcript = raw.toLowerCase().trim();
+          const clean = transcript.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, ' ').replace(/\s+/g, ' ').trim();
+
+          // Comprehensive wake word detection for "Hey Jarvis", "Jarvis", "हे जार्विस", and common phonemes
+          const wakeWordRegex = /\b(hey|hay|hi|hello|ok|okay|oye|ae|a|sun|suno|he)?\s*(jarvis|jervis|jarves|javis|jarvish|service|travis|charvis|jahvis)\b|जार्विस|हे\s*जार्विस|हाय\s*जार्विस|सुनो\s*जार्विस|जारविस/i;
+
+          if (wakeWordRegex.test(clean) || wakeWordRegex.test(raw)) {
+            const now = Date.now();
+            // Debounce within 2 seconds
+            if (now - this.lastDetectedTimestamp > 2000) {
+              this.lastDetectedTimestamp = now;
+              console.log('[WakeWord] Wake word detected: "Hey Jarvis" from transcript:', raw);
+              this.notifyDetected();
+              break;
+            }
           }
         }
       };
 
       this.recognition.onerror = (e: any) => {
+        this.isStarting = false;
         if (e.error === 'not-allowed') {
-          console.warn('[WakeWord] Mic permission not granted for wake word');
-          this.isRunning = false;
+          console.warn('[WakeWord] Microphone permission not allowed for wake word');
+          this.isListening = false;
           return;
         }
-        // Auto-restart on transient errors if running
+
+        if (e.error !== 'no-speech') {
+          console.log('[WakeWord] Recognition transient event:', e.error);
+        }
+
+        // Auto-restart on transient events if running
         if (this.isRunning) {
-          this.scheduleRestart();
+          this.scheduleRestart(350);
         }
       };
 
       this.recognition.onend = () => {
+        this.isStarting = false;
+        this.isListening = false;
         if (this.isRunning) {
-          this.scheduleRestart();
+          this.scheduleRestart(250);
         }
       };
     } catch (err) {
@@ -63,15 +104,48 @@ export class SpeechWakeWordProvider implements WakeWordProvider {
     }
   }
 
-  private scheduleRestart() {
+  private scheduleRestart(delayMs: number = 300) {
     if (this.restartTimeout) clearTimeout(this.restartTimeout);
     this.restartTimeout = setTimeout(() => {
-      if (this.isRunning && this.recognition) {
-        try {
-          this.recognition.start();
-        } catch {}
+      if (this.isRunning && !this.isListening && !this.isStarting) {
+        this.safeStart();
       }
-    }, 400);
+    }, delayMs);
+  }
+
+  private safeStart() {
+    if (!this.isRunning || this.isListening || this.isStarting) return;
+
+    if (!this.recognition) {
+      this.initRecognition();
+    }
+
+    if (!this.recognition) return;
+
+    try {
+      this.isStarting = true;
+      this.recognition.start();
+    } catch (err: any) {
+      this.isStarting = false;
+      // If recognition is already started, mark listening
+      if (err.name === 'InvalidStateError' || (err.message && err.message.includes('already started'))) {
+        this.isListening = true;
+      } else {
+        // Retry with backoff
+        this.scheduleRestart(600);
+      }
+    }
+  }
+
+  private startWatchdog() {
+    if (this.watchdogInterval) clearInterval(this.watchdogInterval);
+    // Periodically verify wake-word health
+    this.watchdogInterval = setInterval(() => {
+      if (this.isRunning && !this.isListening && !this.isStarting) {
+        console.log('[WakeWord Watchdog] Re-arming wake word listener');
+        this.safeStart();
+      }
+    }, 3000);
   }
 
   public onDetected(callback: () => void): void {
@@ -89,17 +163,14 @@ export class SpeechWakeWordProvider implements WakeWordProvider {
   }
 
   public async start(): Promise<void> {
-    if (this.isRunning) return;
     this.isRunning = true;
-    if (this.recognition) {
-      try {
-        this.recognition.start();
-      } catch {}
-    }
+    this.safeStart();
   }
 
   public async stop(): Promise<void> {
     this.isRunning = false;
+    this.isStarting = false;
+    this.isListening = false;
     if (this.restartTimeout) {
       clearTimeout(this.restartTimeout);
       this.restartTimeout = null;
@@ -111,8 +182,16 @@ export class SpeechWakeWordProvider implements WakeWordProvider {
     }
   }
 
+  public getIsListening(): boolean {
+    return this.isListening;
+  }
+
   public async destroy(): Promise<void> {
     await this.stop();
+    if (this.watchdogInterval) {
+      clearInterval(this.watchdogInterval);
+      this.watchdogInterval = null;
+    }
     this.detectedCallbacks = [];
     this.recognition = null;
   }
@@ -122,12 +201,12 @@ export class SpeechWakeWordProvider implements WakeWordProvider {
  * WakeWordManager orchestrates the wake-word provider
  */
 export class WakeWordManager {
-  private provider: WakeWordProvider;
+  private provider: SpeechWakeWordProvider;
   private isEnabled: boolean = true;
   private onWakeWordDetectedCallback?: () => void;
 
   constructor(customProvider?: WakeWordProvider) {
-    this.provider = customProvider || new SpeechWakeWordProvider();
+    this.provider = (customProvider as SpeechWakeWordProvider) || new SpeechWakeWordProvider();
     this.provider.onDetected(() => {
       if (this.isEnabled && this.onWakeWordDetectedCallback) {
         this.onWakeWordDetectedCallback();
@@ -147,6 +226,10 @@ export class WakeWordManager {
   public async stop(): Promise<void> {
     this.isEnabled = false;
     await this.provider.stop();
+  }
+
+  public isListening(): boolean {
+    return this.isEnabled && this.provider.getIsListening();
   }
 
   public async destroy(): Promise<void> {

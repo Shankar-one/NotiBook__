@@ -22,6 +22,7 @@ export const MicrophonePermissionPrompt: React.FC<MicrophonePermissionPromptProp
       setPermissionStatus(status);
       if (status === 'granted') {
         setShowPrompt(false);
+        void voiceSession.enableWakeWord();
       } else if (!dismissed) {
         setShowPrompt(true);
       }

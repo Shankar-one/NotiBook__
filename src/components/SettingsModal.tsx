@@ -144,6 +144,54 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
+          {/* Voice & Language Preferences */}
+          <div className="pt-3 border-t border-[#EFE9DF] space-y-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-[#A0988F] block">
+              Jarvis Voice & Language Settings
+            </span>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-[#524B45] mb-1">
+                  Default Language
+                </label>
+                <select
+                  value={localStorage.getItem('notibook_preferred_language') || 'auto'}
+                  onChange={(e) => {
+                    const val = e.target.value as any;
+                    localStorage.setItem('notibook_preferred_language', val);
+                    import('../voice').then(m => m.voiceSession.setLanguage(val));
+                  }}
+                  className="w-full px-3 py-2 rounded-xl bg-[#FAF7F2] border border-[#EFE9DF] text-xs font-semibold text-[#1E232A] focus:outline-none focus:border-[#E85D43]"
+                >
+                  <option value="auto">Auto-Detect from Voice</option>
+                  <option value="english">English (US / Indian English)</option>
+                  <option value="hinglish">Hinglish (Colloquial)</option>
+                  <option value="hindi">हिन्दी (Devanagari)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#524B45] mb-1">
+                  Wake Word ("Hey Jarvis")
+                </label>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const m = await import('../voice');
+                    await m.voiceSession.enableWakeWord();
+                  }}
+                  className="w-full px-3 py-2 rounded-xl bg-[#FAF7F2] border border-[#EFE9DF] hover:border-[#E85D43]/50 text-xs font-semibold text-[#1E232A] text-left flex items-center justify-between"
+                >
+                  <span>Re-arm "Hey Jarvis"</span>
+                  <span className="text-[10px] text-emerald-600 font-bold bg-emerald-50 px-2 py-0.5 rounded-full">
+                    Active
+                  </span>
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* Data Controls & Display Mode */}
           <div className="pt-3 border-t border-[#EFE9DF] space-y-2">
             <span className="text-[11px] font-bold uppercase tracking-wider text-[#A0988F] block">

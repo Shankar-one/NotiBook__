@@ -26,6 +26,7 @@ export interface ConversationTurn {
   role: 'user' | 'assistant' | 'system';
   text: string;
   timestamp: number;
+  lang?: 'hindi' | 'hinglish' | 'english';
 }
 
 export interface ConversationContext {

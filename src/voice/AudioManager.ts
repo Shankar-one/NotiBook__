@@ -12,9 +12,28 @@ export class AudioManager {
   private onAudioChunkCallback?: (base64Chunk: string) => void;
   private onVolumeChangeCallback?: (volume: number) => void;
   private volumeInterval?: any;
+  private cachedVoices: SpeechSynthesisVoice[] = [];
 
   constructor() {
-    // Lazy init audio contexts on user interaction
+    this.initVoices();
+  }
+
+  private initVoices() {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      this.cachedVoices = window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = () => {
+        this.cachedVoices = window.speechSynthesis.getVoices();
+      };
+    }
+  }
+
+  private getVoices(): SpeechSynthesisVoice[] {
+    if (this.cachedVoices.length > 0) return this.cachedVoices;
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      this.cachedVoices = window.speechSynthesis.getVoices();
+      return this.cachedVoices;
+    }
+    return [];
   }
 
   public static async checkPermission(): Promise<'granted' | 'denied' | 'prompt'> {
@@ -208,8 +227,11 @@ export class AudioManager {
     }
   }
 
-  // Speak text using Web Speech API synthesis as reliable instant voice layer
-  // The language of spoken audio response strictly matches the language of generated response text
+  /**
+   * Speak text using Web Speech API synthesis as reliable instant voice layer.
+   * Special instruction requirement: "Main sun raha hu should be hindi accent".
+   * For Hindi/Hinglish speech, selects authentic Hindi/Indian accent voices.
+   */
   public speakText(
     text: string,
     lang?: 'hindi' | 'hinglish' | 'english' | string,
@@ -225,73 +247,125 @@ export class AudioManager {
       }
 
       window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 1.02;
-      utterance.pitch = 1.0;
+
+      const voices = this.getVoices();
+      const lowerText = text.toLowerCase().trim();
+
+      // Check if text is "Main sun raha hu" or variants
+      const isMainSunRahaHu = 
+        lowerText.includes('main sun raha') || 
+        lowerText.includes('sun raha hu') || 
+        lowerText.includes('sun raha hoon') ||
+        text.includes('सुन रहा हूँ') ||
+        text.includes('सुन रहा हूं');
 
       const isDevanagari = /[\u0900-\u097F]/.test(text);
-      const isHindi = lang === 'hindi' || isDevanagari;
-      const isEnglish = lang === 'english' && !isDevanagari;
+      const isHindi = lang === 'hindi' || isDevanagari || isMainSunRahaHu;
+      const isEnglish = lang === 'english' && !isDevanagari && !isMainSunRahaHu;
       const isHinglish = !isHindi && !isEnglish;
 
-      const voices = window.speechSynthesis.getVoices();
+      // Find the best voice with Hindi accent
+      let chosenVoice: SpeechSynthesisVoice | undefined;
+      let targetLang = 'hi-IN';
+      let spokenUtteranceText = text;
 
-      if (isHindi) {
-        // Pure Hindi voice
-        utterance.lang = 'hi-IN';
-        const hindiVoice = voices.find(
-          (v) => v.lang.startsWith('hi') || v.name.toLowerCase().includes('hindi')
-        );
-        if (hindiVoice) utterance.voice = hindiVoice;
-      } else if (isHinglish) {
-        // Hinglish voice: prefers Indian English/Hindi voice for natural colloquial phonetics
-        utterance.lang = 'hi-IN';
-        const indianVoice = voices.find(
-          (v) =>
-            v.lang === 'hi-IN' ||
-            v.lang === 'en-IN' ||
-            v.name.includes('India') ||
-            v.name.includes('Hindi') ||
-            v.lang.startsWith('hi')
-        );
-        if (indianVoice) {
-          utterance.voice = indianVoice;
+      // Find Hindi native voices
+      const hindiVoice = voices.find(
+        (v) =>
+          v.lang.startsWith('hi') ||
+          v.name.toLowerCase().includes('hindi') ||
+          v.name.toLowerCase().includes('lekha') ||
+          v.name.toLowerCase().includes('kalpana') ||
+          v.name.toLowerCase().includes('swara') ||
+          v.name.toLowerCase().includes('madhur')
+      );
+
+      // Find Indian English voices (natural Indian accent)
+      const indianVoice = voices.find(
+        (v) =>
+          v.lang === 'en-IN' ||
+          v.name.toLowerCase().includes('india') ||
+          v.name.toLowerCase().includes('neerja') ||
+          v.name.toLowerCase().includes('prabhat') ||
+          v.name.toLowerCase().includes('ravi') ||
+          v.name.toLowerCase().includes('heera')
+      );
+
+      if (isMainSunRahaHu) {
+        // "Main sun raha hu should be hindi accent"
+        targetLang = 'hi-IN';
+        if (hindiVoice) {
+          chosenVoice = hindiVoice;
+          // Native Hindi speech engines pronounce Devanagari flawlessly in Hindi accent
+          spokenUtteranceText = 'मैं सुन रहा हूँ।';
+        } else if (indianVoice) {
+          chosenVoice = indianVoice;
+          targetLang = 'en-IN';
+          spokenUtteranceText = 'Main sun raha hu.';
         } else {
-          utterance.lang = 'en-IN';
+          // If no specific Hindi/Indian voice, still set lang to hi-IN
+          targetLang = 'hi-IN';
+          spokenUtteranceText = 'मैं सुन रहा हूँ';
+        }
+      } else if (isHindi) {
+        targetLang = 'hi-IN';
+        chosenVoice = hindiVoice || indianVoice;
+      } else if (isHinglish) {
+        // Hinglish uses Indian accent voice
+        targetLang = 'hi-IN';
+        chosenVoice = indianVoice || hindiVoice;
+        if (!chosenVoice) {
+          targetLang = 'en-IN';
         }
       } else {
         // English voice
-        utterance.lang = 'en-US';
+        targetLang = 'en-US';
         const engVoice = voices.find(
           (v) =>
-            (v.lang.startsWith('en') && (v.name.includes('Google') || v.name.includes('Natural') || v.lang.includes('IN') || v.lang.includes('US'))) ||
+            v.lang === 'en-IN' || // Prefer clear Indian English if available, or natural US English
+            (v.lang.startsWith('en') && (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Samantha') || v.name.includes('Jenny'))) ||
             v.lang.startsWith('en')
         );
-        if (engVoice) utterance.voice = engVoice;
+        chosenVoice = engVoice;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(spokenUtteranceText);
+      utterance.rate = 1.0;
+      utterance.pitch = 1.0;
+      utterance.lang = targetLang;
+      if (chosenVoice) {
+        utterance.voice = chosenVoice;
       }
 
       this.isPlaying = true;
 
-      utterance.onend = () => {
+      const finish = () => {
         this.isPlaying = false;
         onEnd?.();
         resolve();
       };
 
-      utterance.onerror = () => {
-        this.isPlaying = false;
-        onEnd?.();
-        resolve();
+      utterance.onend = finish;
+      utterance.onerror = (e) => {
+        console.warn('[AudioManager] TTS utterance ended/error:', e);
+        finish();
       };
 
-      window.speechSynthesis.speak(utterance);
+      try {
+        window.speechSynthesis.speak(utterance);
+      } catch (err) {
+        console.warn('[AudioManager] SpeechSynthesis speak failed:', err);
+        finish();
+      }
     });
   }
 
   // Interruption / Barge-in: stops any currently playing audio immediately
   public interruptPlayback(): void {
     if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
+      try {
+        window.speechSynthesis.cancel();
+      } catch {}
     }
 
     this.activeSources.forEach((src) => {

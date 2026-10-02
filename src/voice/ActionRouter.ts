@@ -39,7 +39,7 @@ import {
   fetchBusinessSummary, 
   BusinessSummary 
 } from '../api/reports';
-import { UserLanguage, formatLocalizedResponse } from './LanguageUtils';
+import { UserLanguage, formatLocalizedResponse, cleanPartyOrCustomerName } from './LanguageUtils';
 
 export type NavigationTarget = 
   | 'home' 
@@ -179,8 +179,10 @@ export class ActionRouter {
       description: description || (customer ? `${transactionType === 'credit' ? 'Payment from' : 'Given to'} ${customer.name}` : undefined),
     });
 
-    if (customer && this.callbacks.onCustomerUpdated) {
-      this.callbacks.onCustomerUpdated(customer);
+    const finalCustomer = tx.customer || customer;
+
+    if (finalCustomer && this.callbacks.onCustomerUpdated) {
+      this.callbacks.onCustomerUpdated(finalCustomer);
     }
     if (this.callbacks.onTransactionAdded) {
       this.callbacks.onTransactionAdded(tx);
@@ -189,7 +191,7 @@ export class ActionRouter {
       this.callbacks.onRefreshData();
     }
 
-    const name = customer ? customer.name : (customerNameOrId || 'खाता');
+    const name = finalCustomer ? finalCustomer.name : (customerNameOrId || 'खाता');
 
     const responseText = formatLocalizedResponse(lang, {
       hindi: `हो गया। ${name} के खाते में ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'जमा (क्रेडिट)' : 'उधार (डेबिट)'} जोड़ दिए गए हैं।`,
@@ -197,7 +199,7 @@ export class ActionRouter {
       english: `Done. Added ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'credit' : 'debit'} to ${name}'s account.`,
     });
 
-    return { transaction: tx, customer: customer || undefined, responseText };
+    return { transaction: tx, customer: finalCustomer || undefined, responseText };
   }
 
   // 3. Create Sale & Billing (Atomic pipeline: invoice, stock deduction, payment, customer khata)
@@ -330,8 +332,10 @@ export class ActionRouter {
       ),
     });
 
-    if (customer && this.callbacks.onCustomerUpdated) {
-      this.callbacks.onCustomerUpdated(customer);
+    const finalCustomer = tx.customer || customer;
+
+    if (finalCustomer && this.callbacks.onCustomerUpdated) {
+      this.callbacks.onCustomerUpdated(finalCustomer);
     }
     if (this.callbacks.onTransactionAdded) {
       this.callbacks.onTransactionAdded(tx);

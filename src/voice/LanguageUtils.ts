@@ -1,15 +1,62 @@
 export type UserLanguage = 'hindi' | 'hinglish' | 'english';
+export type PreferredLanguage = 'auto' | 'english' | 'hinglish' | 'hindi';
+
+const LANGUAGE_STORAGE_KEY = 'notibook_preferred_language';
+
+export function getStoredLanguagePreference(): PreferredLanguage {
+  if (typeof window === 'undefined') return 'auto';
+  const stored = localStorage.getItem(LANGUAGE_STORAGE_KEY);
+  if (stored === 'english' || stored === 'hinglish' || stored === 'hindi' || stored === 'auto') {
+    return stored;
+  }
+  return 'auto';
+}
+
+export function setStoredLanguagePreference(pref: PreferredLanguage): void {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(LANGUAGE_STORAGE_KEY, pref);
+}
 
 /**
  * Continuously detects whether the user is speaking Hindi (Devanagari),
- * Hinglish (Hindi/Urdu phrasing written in Roman script), or English.
+ * Hinglish (Hindi phrasing written in Roman script), or English.
+ * If user has set an explicit language preference (other than 'auto'), that preference is respected.
  */
-export function detectLanguage(text: string): UserLanguage {
-  if (!text) return 'hinglish';
+export function detectLanguage(text: string, preferredLang?: PreferredLanguage): UserLanguage {
+  if (!text) {
+    if (preferredLang && preferredLang !== 'auto') {
+      return preferredLang;
+    }
+    const stored = getStoredLanguagePreference();
+    return stored !== 'auto' ? stored : 'hinglish';
+  }
+
+  // If explicit preference is set and user typed/spoke in that context
+  const activePref = preferredLang || getStoredLanguagePreference();
 
   // 1. Check for Devanagari script (Unicode range \u0900-\u097F)
   if (/[\u0900-\u097F]/.test(text)) {
     return 'hindi';
+  }
+
+  // If user explicitly chose English, check if text has strong Hindi marker; if not, stick to English
+  if (activePref === 'english') {
+    // Only switch to hinglish if strong unambiguous Hindi words appear
+    const strongHindiMarker = /\b(karo|karke|batao|diya|diye|kijiye|hoga|raha|rahi|mera|meri|uska|aap|hum|kya|kyun|kaise|udhar|jama|rupaye|khata|hisab|dhanyawad)\b/i.test(text);
+    if (!strongHindiMarker) {
+      return 'english';
+    }
+  }
+
+  // If user explicitly chose Hindi (Romanized input)
+  if (activePref === 'hindi') {
+    return 'hindi';
+  }
+
+  // If user explicitly chose Hinglish
+  if (activePref === 'hinglish') {
+    // If it's pure English command without any Hindi markers, still respect Hinglish style
+    return 'hinglish';
   }
 
   const lower = text.toLowerCase();
@@ -26,14 +73,14 @@ export function detectLanguage(text: string): UserLanguage {
     'kholo', 'dikhao', 'dikhaye', 'dekho', 'bhejo', 'hatao', 'jodo',
     'udhar', 'jama', 'rupaye', 'rupees', 'paisa', 'paise', 'kharcha', 'kharch', 'bikri', 'munafa',
     'baki', 'dhanyawad', 'shukriya', 'namaste', 'bhai', 'bhaiya', 'khatabook', 'khata', 'hisab',
-    'dalo', 'likho', 'chahiye'
+    'dalo', 'likho', 'chahiye', 'sun', 'suno'
   ];
 
   const words = lower.split(/[^a-zA-Z0-9]+/).filter(Boolean);
   const hasUnambiguousHinglish = words.some(w => unambiguousHinglishWords.includes(w));
 
   // Hinglish phrases with ambiguous short words like "do" (give) or "me" (in)
-  const hasHinglishPhrases = /\b(kar\s+do|de\s+do|bata\s+do|hata\s+do|bhej\s+do|market\s+me|khata\s+me|dukan\s+me|us\s+me|is\s+me|ka\s+balance|ki\s+last|hai\s+ya|hai\s+kya)\b/i.test(lower);
+  const hasHinglishPhrases = /\b(kar\s+do|de\s+do|bata\s+do|hata\s+do|bhej\s+do|market\s+me|khata\s+me|dukan\s+me|us\s+me|is\s+me|ka\s+balance|ki\s+last|hai\s+ya|hai\s+kya|main\s+sun|sun\s+raha)\b/i.test(lower);
 
   if (hasUnambiguousHinglish || hasHinglishPhrases) {
     return 'hinglish';
@@ -54,6 +101,19 @@ export function formatLocalizedResponse(
   if (lang === 'hindi') return templates.hindi;
   if (lang === 'english') return templates.english;
   return templates.hinglish;
+}
+
+/**
+ * Wake response text matching the voice language
+ */
+export function getWakeGreetingText(lang: UserLanguage): string {
+  if (lang === 'hindi') {
+    return 'हाँ, मैं सुन रहा हूँ।';
+  }
+  if (lang === 'english') {
+    return 'Yes, I am listening.';
+  }
+  return 'Main sun raha hu.';
 }
 
 /**
@@ -91,4 +151,3 @@ export const LocalizedClarifications = {
       english: `Sorry, this action could not be completed: ${details}`,
     }),
 };
-

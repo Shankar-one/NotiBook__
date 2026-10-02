@@ -35,6 +35,10 @@ import {
   sampleProducts, 
   sampleTransactions 
 } from './data/mockData';
+import { fetchCustomers, createCustomerApi } from './api/customers';
+import { fetchTransactions, addTransactionApi } from './api/transactions';
+import { fetchProducts } from './api/products';
+import { fetchInvoices } from './api/invoices';
 
 export default function App() {
   // Navigation State
@@ -122,6 +126,31 @@ export default function App() {
   const invoicesRef = React.useRef(invoices);
   invoicesRef.current = invoices;
 
+  // On mount: fetch authoritative data from real database / server API endpoints
+  useEffect(() => {
+    let mounted = true;
+    const loadRealDatabase = async () => {
+      try {
+        const [apiCust, apiTx, apiProd, apiInv] = await Promise.all([
+          fetchCustomers(),
+          fetchTransactions(),
+          fetchProducts(),
+          fetchInvoices(),
+        ]);
+        if (mounted) {
+          if (apiCust && apiCust.length > 0) setCustomers(apiCust);
+          if (apiTx && apiTx.length > 0) setTransactions(apiTx);
+          if (apiProd && apiProd.length > 0) setProducts(apiProd);
+          if (apiInv && apiInv.length > 0) setInvoices(apiInv);
+        }
+      } catch (err) {
+        console.warn('Could not load data from real database APIs:', err);
+      }
+    };
+    void loadRealDatabase();
+    return () => { mounted = false; };
+  }, []);
+
   // Wire VoiceSessionManager with React state & router
   useEffect(() => {
     voiceSession.setActionCallbacks({
@@ -175,6 +204,7 @@ export default function App() {
         }
       },
       onCustomerUpdated: (cust) => {
+        setIsPopulatedState(true);
         setCustomers((prev) => {
           const exists = prev.some((c) => c.id === cust.id || c.name.toLowerCase() === cust.name.toLowerCase());
           const updated = exists 
@@ -183,46 +213,218 @@ export default function App() {
           localStorage.setItem('notibook_customers', JSON.stringify(updated));
           return updated;
         });
+        setSelectedCustomerForLedger((prev) => {
+          if (prev && (prev.id === cust.id || prev.name.toLowerCase() === cust.name.toLowerCase())) {
+            return cust;
+          }
+          return prev;
+        });
       },
       onTransactionAdded: (tx) => {
+        setIsPopulatedState(true);
         setTransactions((prev) => {
           const updated = [tx, ...prev.filter(t => t.id !== tx.id)];
           localStorage.setItem('notibook_transactions', JSON.stringify(updated));
           return updated;
         });
+
+        // Update customer balance & passbook entries if party is known
+        const party = tx.partyName;
+        if (party && party !== 'खाता' && party !== 'Customer' && party !== 'Supplier') {
+          let matchedCustId: string | null = null;
+          setCustomers((prev) => {
+            const matchIndex = prev.findIndex(c => (tx.customerId && c.id === tx.customerId) || c.name.toLowerCase() === party.toLowerCase());
+            const delta = tx.type === 'in' ? -tx.amount : tx.amount; // payment received reduces due; given increases due
+            if (matchIndex >= 0) {
+              const cust = prev[matchIndex];
+              matchedCustId = cust.id;
+              const newBal = cust.balance + delta;
+              const updatedCust: Customer = {
+                ...cust,
+                balance: newBal,
+                status: newBal > 0 ? 'due' : newBal < 0 ? 'advance' : 'settled',
+                lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+              };
+              const updated = [...prev];
+              updated[matchIndex] = updatedCust;
+              localStorage.setItem('notibook_customers', JSON.stringify(updated));
+              return updated;
+            } else {
+              // Automatically register customer in list so it reflects in Customers section
+              const newCustId = tx.customerId || `cust-${Date.now()}`;
+              matchedCustId = newCustId;
+              const newCust: Customer = {
+                id: newCustId,
+                name: party,
+                phone: '+91 98000 00000',
+                address: '',
+                balance: delta,
+                status: delta > 0 ? 'due' : delta < 0 ? 'advance' : 'settled',
+                lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+                createdAt: new Intl.DateTimeFormat('en-CA').format(new Date()),
+              };
+              const updated = [newCust, ...prev];
+              localStorage.setItem('notibook_customers', JSON.stringify(updated));
+              return updated;
+            }
+          });
+
+          // Add to customerTransactions for their ledger history
+          const targetCust = customersRef.current.find(c => (tx.customerId && c.id === tx.customerId) || c.name.toLowerCase() === party.toLowerCase());
+          const cId = targetCust?.id || matchedCustId || tx.customerId || `cust-${Date.now()}`;
+          const newCtx: CustomerTransaction = {
+            id: `ctx-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            customerId: cId,
+            type: tx.type === 'in' ? 'got' : 'gave',
+            amount: tx.amount,
+            date: new Intl.DateTimeFormat('en-CA').format(new Date()),
+            note: tx.description || `${tx.type === 'in' ? 'Payment received' : 'Given'} via ${tx.paymentMode}`,
+          };
+          setCustomerTransactions((prev) => {
+            const updated = {
+              ...prev,
+              [cId]: [newCtx, ...(prev[cId] || [])],
+            };
+            localStorage.setItem('notibook_customer_txs', JSON.stringify(updated));
+            return updated;
+          });
+        }
       },
       onInvoiceCreated: (inv) => {
+        setIsPopulatedState(true);
         setInvoices((prev) => {
           const updated = [inv, ...prev.filter(i => i.id !== inv.id)];
           localStorage.setItem('notibook_invoices', JSON.stringify(updated));
           return updated;
         });
         setViewingInvoice(inv);
+
+        // Deduct product stock immediately
+        setProducts((prev) => {
+          const updated = prev.map((p) => {
+            const item = inv.items.find(
+              (i) => (i.productId && i.productId === p.id) || i.name.toLowerCase() === p.name.toLowerCase()
+            );
+            if (item) {
+              return { ...p, stockQty: Math.max(0, p.stockQty - item.qty) };
+            }
+            return p;
+          });
+          localStorage.setItem('notibook_products', JSON.stringify(updated));
+          return updated;
+        });
+
+        // Connect Invoice to Customer balance & ledger
+        if (inv.customerName && inv.customerName.toLowerCase() !== 'walk-in customer') {
+          const dueAmt = inv.dueAmount !== undefined ? inv.dueAmount : (inv.paymentStatus === 'Due' ? inv.grandTotal : 0);
+          let targetCId = inv.customerId;
+
+          setCustomers((prev) => {
+            const matchIndex = prev.findIndex(c => (inv.customerId && c.id === inv.customerId) || c.name.toLowerCase() === inv.customerName.toLowerCase());
+            if (matchIndex >= 0) {
+              const cust = prev[matchIndex];
+              targetCId = cust.id;
+              const newBal = cust.balance + dueAmt;
+              const updatedCust: Customer = {
+                ...cust,
+                balance: newBal,
+                status: newBal > 0 ? 'due' : newBal < 0 ? 'advance' : 'settled',
+                lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+              };
+              const updated = [...prev];
+              updated[matchIndex] = updatedCust;
+              localStorage.setItem('notibook_customers', JSON.stringify(updated));
+              return updated;
+            } else {
+              const newCustId = inv.customerId || `cust-${Date.now()}`;
+              targetCId = newCustId;
+              const newCust: Customer = {
+                id: newCustId,
+                name: inv.customerName,
+                phone: inv.customerPhone || '+91 98000 00000',
+                balance: dueAmt,
+                lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+                status: dueAmt > 0 ? 'due' : 'settled',
+                createdAt: new Intl.DateTimeFormat('en-CA').format(new Date()),
+              };
+              const updated = [newCust, ...prev];
+              localStorage.setItem('notibook_customers', JSON.stringify(updated));
+              return updated;
+            }
+          });
+
+          // Add to customerTransactions for their ledger history
+          const cId = targetCId || `cust-${Date.now()}`;
+          const itemsSummary = inv.items.map(i => `${i.qty}x ${i.name}`).join(', ');
+          const billCtx: CustomerTransaction = {
+            id: `ctx-${Date.now()}-bill`,
+            customerId: cId,
+            type: 'gave',
+            amount: inv.grandTotal,
+            date: inv.date || new Intl.DateTimeFormat('en-CA').format(new Date()),
+            note: `Bill ${inv.invoiceNumber} (${itemsSummary})`,
+            billId: inv.id,
+          };
+          const newEntries: CustomerTransaction[] = [billCtx];
+          if (inv.paidAmount && inv.paidAmount > 0) {
+            newEntries.unshift({
+              id: `ctx-${Date.now()}-pay`,
+              customerId: cId,
+              type: 'got',
+              amount: inv.paidAmount,
+              date: inv.date || new Intl.DateTimeFormat('en-CA').format(new Date()),
+              note: `Payment for ${inv.invoiceNumber} via ${inv.paymentMode}`,
+              billId: inv.id,
+            });
+          }
+          setCustomerTransactions((prev) => {
+            const updated = {
+              ...prev,
+              [cId]: [...newEntries, ...(prev[cId] || [])],
+            };
+            localStorage.setItem('notibook_customer_txs', JSON.stringify(updated));
+            return updated;
+          });
+        }
       },
       onProductsUpdated: (prods) => {
         setProducts(prods);
         localStorage.setItem('notibook_products', JSON.stringify(prods));
       },
-      onRefreshData: () => {
-        const savedCust = localStorage.getItem('notibook_customers');
-        if (savedCust) setCustomers(JSON.parse(savedCust));
-        const savedTx = localStorage.getItem('notibook_transactions');
-        if (savedTx) setTransactions(JSON.parse(savedTx));
-        const savedProd = localStorage.getItem('notibook_products');
-        if (savedProd) setProducts(JSON.parse(savedProd));
-        const savedInv = localStorage.getItem('notibook_invoices');
-        if (savedInv) setInvoices(JSON.parse(savedInv));
+      onRefreshData: async () => {
+        try {
+          const [apiCust, apiTx, apiProd, apiInv] = await Promise.all([
+            fetchCustomers(),
+            fetchTransactions(),
+            fetchProducts(),
+            fetchInvoices(),
+          ]);
+          if (apiCust) setCustomers(apiCust);
+          if (apiTx) setTransactions(apiTx);
+          if (apiProd) setProducts(apiProd);
+          if (apiInv) setInvoices(apiInv);
+        } catch {}
       },
     });
   }, []);
 
   // Sync trigger
-  const handleSync = () => {
+  const handleSync = async () => {
     setIsSyncing(true);
-    setTimeout(() => {
-      setIsSyncing(false);
-      setSyncTimeText('Synced just now');
-    }, 600);
+    try {
+      const [apiCust, apiTx, apiProd, apiInv] = await Promise.all([
+        fetchCustomers(),
+        fetchTransactions(),
+        fetchProducts(),
+        fetchInvoices(),
+      ]);
+      if (apiCust && apiCust.length > 0) setCustomers(apiCust);
+      if (apiTx && apiTx.length > 0) setTransactions(apiTx);
+      if (apiProd && apiProd.length > 0) setProducts(apiProd);
+      if (apiInv && apiInv.length > 0) setInvoices(apiInv);
+    } catch {}
+    setIsSyncing(false);
+    setSyncTimeText('Synced just now');
   };
 
   // Switch display state toggle
@@ -232,21 +434,100 @@ export default function App() {
 
   // Add Customer
   const handleAddCustomer = (newCustomer: Customer) => {
-    setCustomers(prev => [newCustomer, ...prev]);
     setIsPopulatedState(true);
+    setCustomers(prev => {
+      const exists = prev.some(c => c.id === newCustomer.id || c.name.toLowerCase() === newCustomer.name.toLowerCase());
+      const updated = exists
+        ? prev.map(c => (c.id === newCustomer.id || c.name.toLowerCase() === newCustomer.name.toLowerCase() ? newCustomer : c))
+        : [newCustomer, ...prev];
+      localStorage.setItem('notibook_customers', JSON.stringify(updated));
+      return updated;
+    });
+    void createCustomerApi(newCustomer);
   };
 
   // Add Transaction
-  const handleAddTransaction = (newTx: Transaction) => {
-    setTransactions(prev => [newTx, ...prev]);
+  const handleAddTransaction = async (newTx: Transaction) => {
     setIsPopulatedState(true);
+    setTransactions(prev => {
+      const updated = [newTx, ...prev.filter(t => t.id !== newTx.id)];
+      localStorage.setItem('notibook_transactions', JSON.stringify(updated));
+      return updated;
+    });
 
-    // If transaction involves a customer payment, also update their balance
-    if (newTx.category === 'Customer Payment' && newTx.partyName) {
-      const matchedCust = customers.find(c => c.name.toLowerCase() === newTx.partyName?.toLowerCase());
-      if (matchedCust) {
-        handleCustomerTx(matchedCust.id, 'got', newTx.amount, `Payment via ${newTx.paymentMode}`);
-      }
+    // Persist to server API
+    try {
+      await addTransactionApi({
+        customerId: newTx.customerId,
+        partyName: newTx.partyName,
+        amount: newTx.amount,
+        transactionType: newTx.type === 'in' ? 'credit' : 'debit',
+        paymentMode: newTx.paymentMode,
+        category: newTx.category,
+        description: newTx.description,
+      });
+    } catch (err) {
+      console.warn('Could not sync transaction to server:', err);
+    }
+
+    // If transaction involves a customer or party, update customer balance & ledger
+    const party = newTx.partyName;
+    if (party && party !== 'खाता' && party !== 'Customer' && party !== 'Supplier') {
+      const delta = newTx.type === 'in' ? -newTx.amount : newTx.amount;
+      let matchedCustId: string | null = null;
+
+      setCustomers(prev => {
+        const matchIndex = prev.findIndex(c => (newTx.customerId && c.id === newTx.customerId) || c.name.toLowerCase() === party.toLowerCase());
+        if (matchIndex >= 0) {
+          const cust = prev[matchIndex];
+          matchedCustId = cust.id;
+          const newBal = cust.balance + delta;
+          const updatedCust: Customer = {
+            ...cust,
+            balance: newBal,
+            status: newBal > 0 ? 'due' : newBal < 0 ? 'advance' : 'settled',
+            lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+          };
+          const updated = [...prev];
+          updated[matchIndex] = updatedCust;
+          localStorage.setItem('notibook_customers', JSON.stringify(updated));
+          return updated;
+        } else {
+          const newCustId = newTx.customerId || `cust-${Date.now()}`;
+          matchedCustId = newCustId;
+          const newCust: Customer = {
+            id: newCustId,
+            name: party,
+            phone: '+91 98000 00000',
+            address: '',
+            balance: delta,
+            status: delta > 0 ? 'due' : delta < 0 ? 'advance' : 'settled',
+            lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+            createdAt: new Intl.DateTimeFormat('en-CA').format(new Date()),
+          };
+          const updated = [newCust, ...prev];
+          localStorage.setItem('notibook_customers', JSON.stringify(updated));
+          return updated;
+        }
+      });
+
+      const cId = matchedCustId || newTx.customerId || `cust-${Date.now()}`;
+      const newCtx: CustomerTransaction = {
+        id: `ctx-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        customerId: cId,
+        type: newTx.type === 'in' ? 'got' : 'gave',
+        amount: newTx.amount,
+        date: new Intl.DateTimeFormat('en-CA').format(new Date()),
+        note: newTx.description || `${newTx.type === 'in' ? 'Payment received' : 'Given'} via ${newTx.paymentMode}`,
+      };
+      setCustomerTransactions(prev => {
+        const updated = {
+          ...prev,
+          [cId]: [newCtx, ...(prev[cId] || [])],
+        };
+        localStorage.setItem('notibook_customer_txs', JSON.stringify(updated));
+        return updated;
+      });
     }
   };
 
@@ -277,7 +558,7 @@ export default function App() {
     setIsPopulatedState(true);
   };
 
-  // Finalize Invoice (Atomic connection: invoice + stock deduction + real payment transaction)
+  // Finalize Invoice (Atomic connection: invoice + stock deduction + real payment transaction + customer khata)
   const handleFinalizeBill = (newInvoice: Invoice) => {
     setInvoices(prev => [newInvoice, ...prev]);
     setIsPopulatedState(true);
@@ -322,33 +603,86 @@ export default function App() {
       setTransactions(prev => [newTx, ...prev]);
     }
 
-    // If unpaid due exists, update/create customer balance
-    if (dueAmt > 0) {
-      let cust = customers.find(c => c.name.toLowerCase() === newInvoice.customerName.toLowerCase());
-      if (cust) {
-        handleCustomerTx(cust.id, 'gave', dueAmt, `Bill ${newInvoice.invoiceNumber}`);
-      } else {
-        const newCust: Customer = {
-          id: `cust-${Date.now()}`,
-          name: newInvoice.customerName,
-          phone: newInvoice.customerPhone || '+91 98000 00000',
-          balance: dueAmt,
-          lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
-          status: 'due',
-          createdAt: new Intl.DateTimeFormat('en-CA').format(new Date()),
-        };
-        setCustomers(prev => [newCust, ...prev]);
+    // Always ensure customer balance & ledger entry are reflected in Customers section
+    if (newInvoice.customerName && newInvoice.customerName.toLowerCase() !== 'walk-in customer') {
+      let targetCustId = newInvoice.customerId;
+      setCustomers(prev => {
+        const matchIndex = prev.findIndex(c => (newInvoice.customerId && c.id === newInvoice.customerId) || c.name.toLowerCase() === newInvoice.customerName.toLowerCase());
+        if (matchIndex >= 0) {
+          const cust = prev[matchIndex];
+          targetCustId = cust.id;
+          const newBal = cust.balance + dueAmt;
+          const updatedCust: Customer = {
+            ...cust,
+            balance: newBal,
+            status: newBal > 0 ? 'due' : newBal < 0 ? 'advance' : 'settled',
+            lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+          };
+          const updated = [...prev];
+          updated[matchIndex] = updatedCust;
+          localStorage.setItem('notibook_customers', JSON.stringify(updated));
+          return updated;
+        } else {
+          const newCustId = newInvoice.customerId || `cust-${Date.now()}`;
+          targetCustId = newCustId;
+          const newCust: Customer = {
+            id: newCustId,
+            name: newInvoice.customerName,
+            phone: newInvoice.customerPhone || '+91 98000 00000',
+            balance: dueAmt,
+            lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+            status: dueAmt > 0 ? 'due' : 'settled',
+            createdAt: new Intl.DateTimeFormat('en-CA').format(new Date()),
+          };
+          const updated = [newCust, ...prev];
+          localStorage.setItem('notibook_customers', JSON.stringify(updated));
+          return updated;
+        }
+      });
+
+      // Add to customerTransactions for customer ledger
+      const cId = targetCustId || `cust-${Date.now()}`;
+      const itemsSummary = newInvoice.items.map(i => `${i.qty}x ${i.name}`).join(', ');
+      const billCtx: CustomerTransaction = {
+        id: `ctx-${Date.now()}-bill`,
+        customerId: cId,
+        type: 'gave',
+        amount: newInvoice.grandTotal,
+        date: newInvoice.date || new Intl.DateTimeFormat('en-CA').format(new Date()),
+        note: `Bill ${newInvoice.invoiceNumber} (${itemsSummary})`,
+        billId: newInvoice.id,
+      };
+      const newEntries: CustomerTransaction[] = [billCtx];
+      if (paidAmt > 0) {
+        newEntries.unshift({
+          id: `ctx-${Date.now()}-pay`,
+          customerId: cId,
+          type: 'got',
+          amount: paidAmt,
+          date: newInvoice.date || new Intl.DateTimeFormat('en-CA').format(new Date()),
+          note: `Payment for ${newInvoice.invoiceNumber} via ${newInvoice.paymentMode}`,
+          billId: newInvoice.id,
+        });
       }
+      setCustomerTransactions(prev => {
+        const updated = {
+          ...prev,
+          [cId]: [...newEntries, ...(prev[cId] || [])],
+        };
+        localStorage.setItem('notibook_customer_txs', JSON.stringify(updated));
+        return updated;
+      });
     }
   };
 
   // Customer Khatabook Transaction (Gave / Got)
-  const handleCustomerTx = (
+  const handleCustomerTx = async (
     customerId: string, 
     type: 'gave' | 'got', 
     amount: number, 
     note: string
   ) => {
+    setIsPopulatedState(true);
     const newCtx: CustomerTransaction = {
       id: `ctx-${Date.now()}`,
       customerId,
@@ -358,14 +692,20 @@ export default function App() {
       note,
     };
 
-    setCustomerTransactions(prev => ({
-      ...prev,
-      [customerId]: [newCtx, ...(prev[customerId] || [])]
-    }));
+    setCustomerTransactions(prev => {
+      const updated = {
+        ...prev,
+        [customerId]: [newCtx, ...(prev[customerId] || [])]
+      };
+      localStorage.setItem('notibook_customer_txs', JSON.stringify(updated));
+      return updated;
+    });
 
+    let custName = '';
     // Update customer balance: gave increases due, got decreases due
     setCustomers(prev => prev.map(c => {
       if (c.id === customerId) {
+        custName = c.name;
         const delta = type === 'gave' ? amount : -amount;
         const newBal = c.balance + delta;
         return {
@@ -392,6 +732,18 @@ export default function App() {
       }
       return prev;
     });
+
+    // Also sync to real financial transaction record
+    try {
+      await addTransactionApi({
+        customerId,
+        partyName: custName,
+        amount,
+        transactionType: type === 'got' ? 'credit' : 'debit',
+        paymentMode: 'Cash',
+        description: note,
+      });
+    } catch {}
   };
 
   // WhatsApp Reminder Sender
@@ -570,7 +922,22 @@ export default function App() {
         isOpen={!!selectedCustomerForLedger}
         customer={selectedCustomerForLedger}
         onClose={() => setSelectedCustomerForLedger(null)}
-        transactions={selectedCustomerForLedger ? (customerTransactions[selectedCustomerForLedger.id] || []) : []}
+        transactions={selectedCustomerForLedger ? [
+          ...(customerTransactions[selectedCustomerForLedger.id] || []),
+          ...transactions
+            .filter(t => (t.customerId && t.customerId === selectedCustomerForLedger.id) || (t.partyName && t.partyName.toLowerCase() === selectedCustomerForLedger.name.toLowerCase()))
+            .map(t => ({
+              id: `ctx-${t.id}`,
+              customerId: selectedCustomerForLedger.id,
+              type: (t.type === 'in' ? 'got' : 'gave') as 'got' | 'gave',
+              amount: t.amount,
+              date: t.date.slice(0, 10),
+              note: t.description || `${t.type === 'in' ? 'Payment received' : 'Given'} via ${t.paymentMode}`,
+              billId: t.invoiceId,
+            }))
+        ].filter((tx, idx, arr) => arr.findIndex(x => x.id === tx.id || (x.note === tx.note && x.amount === tx.amount && x.date === tx.date)) === idx) : []}
+        invoices={invoices}
+        onViewInvoice={(inv) => setViewingInvoice(inv)}
         onAddCustomerTx={handleCustomerTx}
         onSendWhatsappReminder={handleSendWhatsappReminder}
         settings={settings}

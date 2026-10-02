@@ -172,6 +172,7 @@ export class GeminiLiveManager {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: text,
+          userLanguage: userLang,
           context: this.contextManager.getContext(),
           activeCustomer: customerResolution.customer ? {
             id: customerResolution.customer.id,

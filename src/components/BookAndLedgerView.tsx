@@ -129,6 +129,8 @@ export const BookAndLedgerView: React.FC<BookAndLedgerViewProps> = ({
       {activeSubtab === 'transactions' && (
         <TransactionsSubtab
           transactions={transactions}
+          invoices={invoices}
+          onViewInvoice={onOpenInvoiceModal}
           onOpenAddTransaction={onOpenAddTransaction}
           isPopulatedState={isPopulatedState}
           onTogglePopulatedState={onTogglePopulatedState}
