@@ -176,6 +176,16 @@ export class ActionRouter {
       }
     }
 
+    if (!customer) {
+      const amtStr = amount ? `₹${amount.toLocaleString('en-IN')}` : '₹1,000';
+      const askPrompt = formatLocalizedResponse(lang, {
+        hindi: `${amtStr} किस ग्राहक के खाते में जोड़ना है?`,
+        hinglish: `${amtStr} kis customer ke khate mein add karna hai?`,
+        english: `Which customer's account should I add ${amtStr} to?`,
+      });
+      return { transaction: null as any, responseText: askPrompt };
+    }
+
     let previousBalance = 0;
     let newBalance = 0;
 
@@ -767,14 +777,16 @@ export class ActionRouter {
     phone?: string;
     address?: string;
     openingBalance?: number;
+    notes?: string;
     lang?: UserLanguage;
   }): Promise<{ customer: Customer; responseText: string }> {
-    const { name, phone, address, openingBalance, lang = 'hinglish' } = params;
+    const { name, phone, address, openingBalance, notes, lang = 'hinglish' } = params;
     const customer = await createCustomerApi({
       name,
-      phone: phone || '+91 98000 00000',
+      phone: phone || '', // Never invent fake phone numbers!
       address: address || '',
       balance: openingBalance || 0,
+      notes: notes || '',
     });
 
     if (this.callbacks.onCustomerUpdated) {
@@ -791,6 +803,175 @@ export class ActionRouter {
     });
 
     return { customer, responseText };
+  }
+
+  // 4a-1. External State Notification Helpers (Called by server response)
+  public notifyCustomerUpdated(customer: Customer): void {
+    if (this.callbacks.onCustomerUpdated) {
+      this.callbacks.onCustomerUpdated(customer);
+    }
+    if (this.callbacks.onRefreshData) {
+      this.callbacks.onRefreshData();
+    }
+  }
+
+  public notifyCustomerDeleted(customerId: string): void {
+    if (this.callbacks.onCustomerDeleted) {
+      this.callbacks.onCustomerDeleted(customerId);
+    }
+    if (this.callbacks.onRefreshData) {
+      this.callbacks.onRefreshData();
+    }
+  }
+
+  public notifyTransactionAdded(tx: Transaction): void {
+    if (this.callbacks.onTransactionAdded) {
+      this.callbacks.onTransactionAdded(tx);
+    }
+    if (this.callbacks.onRefreshData) {
+      this.callbacks.onRefreshData();
+    }
+  }
+
+  public notifyTransactionDeleted(txId: string, updatedCustomer?: Customer): void {
+    if (this.callbacks.onTransactionDeleted) {
+      this.callbacks.onTransactionDeleted(txId, updatedCustomer);
+    }
+    if (this.callbacks.onRefreshData) {
+      this.callbacks.onRefreshData();
+    }
+  }
+
+  // 4a-2. Create Customer Note
+  public async createCustomerNote(params: {
+    customerNameOrId: string;
+    note: string;
+    lang?: UserLanguage;
+  }): Promise<{ customer: Customer; responseText: string }> {
+    const { customerNameOrId, note, lang = 'hinglish' } = params;
+    const existing = await getCustomerByIdOrName(customerNameOrId);
+    if (!existing) {
+      throw new Error(`Customer "${customerNameOrId}" not found.`);
+    }
+
+    const updatedNotes = existing.notes 
+      ? `${existing.notes} | ${note.trim()}`
+      : note.trim();
+
+    const updated = await updateCustomerApi(existing.id, { notes: updatedNotes });
+    const finalCust = updated || { ...existing, notes: updatedNotes };
+
+    this.notifyCustomerUpdated(finalCust);
+
+    const responseText = formatLocalizedResponse(lang, {
+      hindi: `${existing.name} के प्रोफाइल में नोट सेव कर दिया गया है: "${note.trim()}"।`,
+      hinglish: `${existing.name} ke profile mein note save kar diya: "${note.trim()}".`,
+      english: `Saved note for ${existing.name}: "${note.trim()}".`,
+    });
+
+    return { customer: finalCust, responseText };
+  }
+
+  // 4a-3. Get Customer Notes
+  public async getCustomerNotes(
+    customerNameOrId: string,
+    lang: UserLanguage = 'hinglish'
+  ): Promise<{ notes: string; responseText: string }> {
+    const customer = await getCustomerByIdOrName(customerNameOrId);
+    if (!customer) {
+      throw new Error(`Customer "${customerNameOrId}" not found.`);
+    }
+
+    if (!customer.notes || !customer.notes.trim()) {
+      const emptyMsg = formatLocalizedResponse(lang, {
+        hindi: `${customer.name} के लिए कोई नोट दर्ज नहीं है।`,
+        hinglish: `${customer.name} ke liye koi note save nahi hai.`,
+        english: `No notes recorded for ${customer.name}.`,
+      });
+      return { notes: '', responseText: emptyMsg };
+    }
+
+    const responseText = formatLocalizedResponse(lang, {
+      hindi: `${customer.name} के नोट्स: ${customer.notes}`,
+      hinglish: `${customer.name} ke notes: ${customer.notes}`,
+      english: `Notes for ${customer.name}: ${customer.notes}`,
+    });
+
+    return { notes: customer.notes, responseText };
+  }
+
+  // 4a-4. Customer Summary (Name, balance, last payment, recent tx, reminders, notes)
+  public async getCustomerSummary(
+    customerNameOrId: string,
+    lang: UserLanguage = 'hinglish'
+  ): Promise<{ summary: any; responseText: string }> {
+    const customer = await getCustomerByIdOrName(customerNameOrId);
+    if (!customer) {
+      throw new Error(`Customer "${customerNameOrId}" not found.`);
+    }
+
+    const allTx = await fetchTransactions();
+    const custTx = allTx.filter(t => (t.customerId && t.customerId === customer.id) || (t.partyName && t.partyName.toLowerCase() === customer.name.toLowerCase()));
+    const lastPayment = custTx.find(t => t.type === 'in' || t.category === 'Customer Payment');
+    const recentTx = custTx[0];
+
+    const allReminders = await fetchReminders();
+    const custReminders = allReminders.filter(r => (r.customerId && r.customerId === customer.id) || (r.customerName && r.customerName.toLowerCase() === customer.name.toLowerCase()));
+
+    const balStr = `₹${Math.abs(customer.balance).toLocaleString('en-IN')}`;
+    const statusDesc = customer.balance > 0 ? 'बकाया' : customer.balance < 0 ? 'एडवांस जमा' : 'खाता चुकता';
+
+    let responseText = formatLocalizedResponse(lang, {
+      hindi: `${customer.name} की समरी: वर्तमान बैलेंस ${balStr} (${statusDesc})। ${lastPayment ? `अंतिम भुगतान: ₹${lastPayment.amount.toLocaleString('en-IN')} (${lastPayment.date})।` : 'कोई पिछला भुगतान नहीं मिला।'} ${custReminders.length > 0 ? `पेंडिंग रिमाइंडर: ${custReminders.length}।` : ''}`,
+      hinglish: `${customer.name} summary: Current balance ${balStr} (${customer.balance > 0 ? 'due' : customer.balance < 0 ? 'advance' : 'settled'}). ${lastPayment ? `Last payment: ₹${lastPayment.amount.toLocaleString('en-IN')} (${lastPayment.date}).` : 'No prior payment recorded.'} ${custReminders.length > 0 ? `Pending reminders: ${custReminders.length}.` : ''}`,
+      english: `Summary for ${customer.name}: Balance is ${balStr} (${customer.balance > 0 ? 'due' : customer.balance < 0 ? 'advance' : 'settled'}). ${lastPayment ? `Last payment: ₹${lastPayment.amount.toLocaleString('en-IN')} on ${lastPayment.date}.` : 'No prior payment found.'} ${custReminders.length > 0 ? `Pending reminders: ${custReminders.length}.` : ''}`,
+    });
+
+    return {
+      summary: {
+        customer,
+        lastPayment,
+        recentTx,
+        reminders: custReminders,
+        notes: customer.notes,
+      },
+      responseText,
+    };
+  }
+
+  // 4a-5. Undo Recent Customer Action (Reverts the most recent transaction)
+  public async undoRecentCustomerAction(
+    lang: UserLanguage = 'hinglish'
+  ): Promise<{ success: boolean; responseText: string }> {
+    const allTx = await fetchTransactions();
+    if (allTx.length === 0) {
+      const emptyMsg = formatLocalizedResponse(lang, {
+        hindi: 'रद्द करने के लिए कोई हालिया लेन-देन नहीं मिला।',
+        hinglish: 'Undo karne ke liye koi recent transaction nahi mila.',
+        english: 'No recent transaction found to undo.',
+      });
+      return { success: false, responseText: emptyMsg };
+    }
+
+    const latestTx = allTx[0];
+    return await this.deleteTransaction(latestTx.id, lang);
+  }
+
+  public async undoLastCustomerAction(
+    lang: UserLanguage = 'hinglish'
+  ): Promise<{ success: boolean; responseText: string }> {
+    return this.undoRecentCustomerAction(lang);
+  }
+
+  public async redoLastCustomerAction(
+    lang: UserLanguage = 'hinglish'
+  ): Promise<{ success: boolean; responseText: string }> {
+    const msg = formatLocalizedResponse(lang, {
+      hindi: 'रीडू क्रिया उपलब्ध नहीं है।',
+      hinglish: 'Redo action available nahi hai.',
+      english: 'Redo action is not available.',
+    });
+    return { success: false, responseText: msg };
   }
 
   // 4b. Get Customer

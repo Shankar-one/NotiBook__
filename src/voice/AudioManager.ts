@@ -228,9 +228,9 @@ export class AudioManager {
   }
 
   /**
-   * Speak text using Web Speech API synthesis as reliable instant voice layer.
-   * Special instruction requirement: "Main sun raha hu should be hindi accent".
-   * For Hindi/Hinglish speech, selects authentic Hindi/Indian accent voices.
+   * Speak text with natural prosody and authentic neural voices.
+   * Cleans currency symbols ("₹" -> "rupaye" / "rupees") and UI labels
+   * so speech sounds human and conversational rather than robotic.
    */
   public speakText(
     text: string,
@@ -249,61 +249,81 @@ export class AudioManager {
       window.speechSynthesis.cancel();
 
       const voices = this.getVoices();
-      const lowerText = text.toLowerCase().trim();
+      let cleanText = text.trim();
+
+      // Strip UI labels like "JARVIS:", "जार्विस:", "Voice Language:", etc.
+      cleanText = cleanText.replace(/^(?:jarvis|जार्विस|assistant|ai)\s*[:\-]\s*/i, '');
+      cleanText = cleanText.replace(/^(?:voice\s+language|detected\s+language)\s*[:\-]\s*/i, '');
+
+      const isDevanagari = /[\u0900-\u097F]/.test(cleanText);
+      const isHindi = lang === 'hindi' || isDevanagari;
+      const isEnglish = lang === 'english' && !isDevanagari;
+      const isHinglish = !isHindi && !isEnglish;
+
+      // Normalize currency symbol to spoken words so TTS doesn't say "Indian rupee sign"
+      if (isEnglish) {
+        cleanText = cleanText.replace(/₹\s*([0-9,]+(?:\.[0-9]+)?)/g, '$1 rupees');
+        cleanText = cleanText.replace(/Rs\.?\s*([0-9,]+(?:\.[0-9]+)?)/gi, '$1 rupees');
+      } else {
+        cleanText = cleanText.replace(/₹\s*([0-9,]+(?:\.[0-9]+)?)/g, '$1 rupaye');
+        cleanText = cleanText.replace(/Rs\.?\s*([0-9,]+(?:\.[0-9]+)?)/gi, '$1 rupaye');
+      }
 
       // Check if text is "Main sun raha hu" or variants
+      const lowerText = cleanText.toLowerCase();
       const isMainSunRahaHu = 
         lowerText.includes('main sun raha') || 
         lowerText.includes('sun raha hu') || 
         lowerText.includes('sun raha hoon') ||
-        text.includes('सुन रहा हूँ') ||
-        text.includes('सुन रहा हूं');
+        cleanText.includes('सुन रहा हूँ') ||
+        cleanText.includes('सुन रहा हूं');
 
-      const isDevanagari = /[\u0900-\u097F]/.test(text);
-      const isHindi = lang === 'hindi' || isDevanagari || isMainSunRahaHu;
-      const isEnglish = lang === 'english' && !isDevanagari && !isMainSunRahaHu;
-      const isHinglish = !isHindi && !isEnglish;
-
-      // Find the best voice with Hindi accent
       let chosenVoice: SpeechSynthesisVoice | undefined;
       let targetLang = 'hi-IN';
-      let spokenUtteranceText = text;
+      let spokenUtteranceText = cleanText;
 
-      // Find Hindi native voices
-      const hindiVoice = voices.find(
-        (v) =>
-          v.lang.startsWith('hi') ||
-          v.name.toLowerCase().includes('hindi') ||
-          v.name.toLowerCase().includes('lekha') ||
-          v.name.toLowerCase().includes('kalpana') ||
-          v.name.toLowerCase().includes('swara') ||
-          v.name.toLowerCase().includes('madhur')
+      // Find Neural / Natural Hindi voices
+      const hindiNaturalVoices = voices.filter(v =>
+        v.lang.startsWith('hi') ||
+        v.name.toLowerCase().includes('hindi') ||
+        v.name.toLowerCase().includes('swara') ||
+        v.name.toLowerCase().includes('madhur') ||
+        v.name.toLowerCase().includes('lekha')
       );
+      // Prefer Microsoft Online (Natural) or Google
+      const hindiVoice = hindiNaturalVoices.find(v => v.name.includes('Natural') || v.name.includes('Online')) ||
+                         hindiNaturalVoices.find(v => v.name.includes('Google')) ||
+                         hindiNaturalVoices[0];
 
-      // Find Indian English voices (natural Indian accent)
-      const indianVoice = voices.find(
-        (v) =>
-          v.lang === 'en-IN' ||
-          v.name.toLowerCase().includes('india') ||
-          v.name.toLowerCase().includes('neerja') ||
-          v.name.toLowerCase().includes('prabhat') ||
-          v.name.toLowerCase().includes('ravi') ||
-          v.name.toLowerCase().includes('heera')
+      // Find Neural / Natural Indian English voices
+      const indianNaturalVoices = voices.filter(v =>
+        v.lang === 'en-IN' ||
+        v.name.toLowerCase().includes('india') ||
+        v.name.toLowerCase().includes('neerja') ||
+        v.name.toLowerCase().includes('prabhat')
       );
+      const indianVoice = indianNaturalVoices.find(v => v.name.includes('Natural') || v.name.includes('Online')) ||
+                          indianNaturalVoices.find(v => v.name.includes('Google')) ||
+                          indianNaturalVoices[0];
+
+      // Find Natural English voices
+      const englishNaturalVoices = voices.filter(v => v.lang.startsWith('en'));
+      const englishVoice = englishNaturalVoices.find(v => v.name.includes('Natural') || v.name.includes('Online')) ||
+                           englishNaturalVoices.find(v => v.lang === 'en-IN') ||
+                           englishNaturalVoices.find(v => v.name.includes('Google')) ||
+                           englishNaturalVoices[0];
 
       if (isMainSunRahaHu) {
         // "Main sun raha hu should be hindi accent"
         targetLang = 'hi-IN';
         if (hindiVoice) {
           chosenVoice = hindiVoice;
-          // Native Hindi speech engines pronounce Devanagari flawlessly in Hindi accent
           spokenUtteranceText = 'मैं सुन रहा हूँ।';
         } else if (indianVoice) {
           chosenVoice = indianVoice;
           targetLang = 'en-IN';
           spokenUtteranceText = 'Main sun raha hu.';
         } else {
-          // If no specific Hindi/Indian voice, still set lang to hi-IN
           targetLang = 'hi-IN';
           spokenUtteranceText = 'मैं सुन रहा हूँ';
         }
@@ -311,27 +331,17 @@ export class AudioManager {
         targetLang = 'hi-IN';
         chosenVoice = hindiVoice || indianVoice;
       } else if (isHinglish) {
-        // Hinglish uses Indian accent voice
-        targetLang = 'hi-IN';
+        targetLang = indianVoice ? 'en-IN' : 'hi-IN';
         chosenVoice = indianVoice || hindiVoice;
-        if (!chosenVoice) {
-          targetLang = 'en-IN';
-        }
       } else {
-        // English voice
         targetLang = 'en-US';
-        const engVoice = voices.find(
-          (v) =>
-            v.lang === 'en-IN' || // Prefer clear Indian English if available, or natural US English
-            (v.lang.startsWith('en') && (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Samantha') || v.name.includes('Jenny'))) ||
-            v.lang.startsWith('en')
-        );
-        chosenVoice = engVoice;
+        chosenVoice = englishVoice;
       }
 
       const utterance = new SpeechSynthesisUtterance(spokenUtteranceText);
-      utterance.rate = 1.0;
-      utterance.pitch = 1.0;
+      // Conversational pacing: slightly brisk (1.05) and pleasant pitch (1.02)
+      utterance.rate = 1.05;
+      utterance.pitch = 1.02;
       utterance.lang = targetLang;
       if (chosenVoice) {
         utterance.voice = chosenVoice;

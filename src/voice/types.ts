@@ -35,7 +35,48 @@ export interface ConversationContext {
     name: string;
     phone?: string;
     balance?: number;
+    address?: string;
+    notes?: string;
   };
+  active_customer?: {
+    id: string;
+    name: string;
+    phone?: string;
+    balance?: number;
+    address?: string;
+    notes?: string;
+  };
+  active_customer_id?: string;
+  last_action?: string;
+  last_created_entity?: {
+    type: 'CUSTOMER' | 'TRANSACTION' | 'REMINDER';
+    id: string;
+    name?: string;
+    amount?: number;
+  };
+  last_transaction?: {
+    id: string;
+    amount: number;
+    type: 'credit' | 'debit';
+    customerId?: string;
+    partyName?: string;
+    date: string;
+  };
+  last_payment?: {
+    id: string;
+    amount: number;
+    customerId?: string;
+    partyName?: string;
+    date: string;
+  };
+  last_query?: string;
+  recentCustomersMentioned?: {
+    id: string;
+    name: string;
+  }[];
+  pending_action?: string | null;
+  pending_field?: string | null;
+  conversation_language?: 'hindi' | 'hinglish' | 'english';
   activeTransaction?: {
     id: string;
     amount?: number;

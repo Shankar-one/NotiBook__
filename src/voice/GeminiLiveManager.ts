@@ -200,9 +200,46 @@ export class GeminiLiveManager {
         }
 
         if (data.reply && data.reply.trim()) {
-          if (customerResolution.customer) {
+          // Sync server authoritative database changes back into frontend state
+          if (data.updatedCustomer) {
+            this.actionRouter.notifyCustomerUpdated(data.updatedCustomer);
+            this.contextManager.setActiveCustomer(data.updatedCustomer);
+          } else if (data.createdCustomer) {
+            this.actionRouter.notifyCustomerUpdated(data.createdCustomer);
+            this.contextManager.setActiveCustomer(data.createdCustomer);
+          } else if (customerResolution.customer) {
             this.contextManager.setActiveCustomer(customerResolution.customer);
           }
+
+          if (data.newTransaction) {
+            this.actionRouter.notifyTransactionAdded(data.newTransaction);
+          }
+
+          if (data.deletedCustomerId) {
+            this.actionRouter.notifyCustomerDeleted(data.deletedCustomerId);
+            this.contextManager.setActiveCustomer(null);
+          }
+
+          if (data.deletedTransactionId) {
+            this.actionRouter.notifyTransactionDeleted(data.deletedTransactionId, data.updatedCustomer);
+          }
+
+          if (data.contextUpdates) {
+            this.contextManager.updateContext(data.contextUpdates);
+          }
+
+          if (data.pendingConfirmation) {
+            this.contextManager.setPendingConfirmation(data.pendingConfirmation);
+          }
+
+          if (data.pendingSlotFilling) {
+            this.contextManager.setPendingSlotFilling(data.pendingSlotFilling);
+          }
+
+          if (data.navigation) {
+            this.actionRouter.navigate(data.navigation.target, data.navigation.options);
+          }
+
           this.respond(data.reply.trim(), userLang);
           return data.reply.trim();
         }
@@ -296,6 +333,22 @@ export class GeminiLiveManager {
       // 3. TRANSACTIONS
       if (name === 'add_transaction') {
         const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
+        if (!custName) {
+          const amtStr = args.amount ? `₹${Number(args.amount).toLocaleString('en-IN')}` : '₹1,000';
+          const askMsg = formatLocalizedResponse(userLang, {
+            hindi: `${amtStr} किस ग्राहक के खाते में जोड़ना है?`,
+            hinglish: `${amtStr} kis customer ke khate mein add karna hai?`,
+            english: `Which customer's account should I add ${amtStr} to?`,
+          });
+          this.contextManager.setPendingSlotFilling({
+            action: 'add_transaction',
+            missingFields: ['customer_name'],
+            gathered: { amount: args.amount, transactionType: args.transaction_type || 'debit' },
+            promptQuestion: askMsg,
+          });
+          return askMsg;
+        }
+
         if (!args.amount) {
           const isPayment = args.transaction_type === 'credit';
           this.contextManager.setPendingSlotFilling({
@@ -600,6 +653,59 @@ export class GeminiLiveManager {
           lang: userLang,
         });
         return args.speech_response || res.responseText;
+      }
+
+      // 12. EXTENDED CUSTOMER KHATA TOOLS
+      if (name === 'create_customer_note') {
+        const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
+        if (!custName) {
+          return formatLocalizedResponse(userLang, {
+            hindi: 'किस ग्राहक के लिए नोट जोड़ना है?',
+            hinglish: 'Kis customer ke liye note add karna hai?',
+            english: 'Which customer would you like to add a note for?',
+          });
+        }
+        const res = await this.actionRouter.createCustomerNote({
+          customerNameOrId: custName,
+          note: args.note || '',
+          lang: userLang,
+        });
+        this.contextManager.setActiveCustomer(res.customer);
+        return res.responseText;
+      }
+
+      if (name === 'get_customer_summary') {
+        const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
+        if (!custName) {
+          return formatLocalizedResponse(userLang, {
+            hindi: 'किस ग्राहक की समरी देखनी है?',
+            hinglish: 'Kis customer ki summary dekhni hai?',
+            english: 'Which customer would you like to view summary for?',
+          });
+        }
+        const res = await this.actionRouter.getCustomerSummary(custName, userLang);
+        if (res.summary?.customer) {
+          this.contextManager.setActiveCustomer(res.summary.customer);
+        }
+        return res.responseText;
+      }
+
+      if (name === 'undo_last_customer_action') {
+        const res = await this.actionRouter.undoLastCustomerAction(userLang);
+        return res.responseText;
+      }
+
+      if (name === 'redo_last_customer_action') {
+        const res = await this.actionRouter.redoLastCustomerAction(userLang);
+        return res.responseText;
+      }
+
+      if (name === 'ask_clarification') {
+        return args.question || formatLocalizedResponse(userLang, {
+          hindi: 'कृपया और विवरण बताएं।',
+          hinglish: 'Kripya thoda aur detail batayein.',
+          english: 'Please provide more details.',
+        });
       }
 
       return formatLocalizedResponse(userLang, {
@@ -953,6 +1059,23 @@ export class GeminiLiveManager {
             english: `"${cleanName}" was not found in the customer list. Would you like to add them as a new customer?`,
           });
         }
+      }
+
+      if (!targetCustomer) {
+        const amtStr = hasAmount && amount ? `₹${amount.toLocaleString('en-IN')}` : '₹1,000';
+        const isPayment = financialIntent === 'PAYMENT_RECEIVED';
+        const askMsg = formatLocalizedResponse(userLang, {
+          hindi: isPayment ? `किस ग्राहक ने ${amtStr} दिए हैं?` : `${amtStr} किस ग्राहक के खाते में जोड़ना है?`,
+          hinglish: isPayment ? `Kis customer ne ${amtStr} diye hain?` : `${amtStr} kis customer ke khate mein add karna hai?`,
+          english: isPayment ? `Which customer paid ${amtStr}?` : `Which customer's account should I add ${amtStr} to?`,
+        });
+        this.contextManager.setPendingSlotFilling({
+          action: 'add_transaction',
+          missingFields: ['customer_name'],
+          gathered: { amount: amount || 1000, transactionType: isPayment ? 'credit' : 'debit' },
+          promptQuestion: askMsg,
+        });
+        return askMsg;
       }
 
       if (!hasAmount || !amount) {

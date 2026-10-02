@@ -311,43 +311,21 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
         {/* Expanded Panel: Dialogue History + Language Controls + Developer Test Mode */}
         {expanded && (
           <div className="p-3.5 bg-black/40 border-t border-slate-800/90 space-y-3 text-xs">
-            {/* Quick Language Selector inside HUD */}
-            <div className="flex items-center justify-between gap-1 p-1 bg-slate-900/90 rounded-xl border border-slate-800">
-              <span className="text-[10px] font-semibold text-slate-400 pl-2 flex items-center gap-1">
-                <Globe size={11} className="text-[#E85D43]" />
-                <span>Voice Language:</span>
+            {/* Automatic Language Detection Status Indicator (Read-Only Status Badge) */}
+            <div className="flex items-center justify-between gap-1 p-2 bg-slate-900/90 rounded-xl border border-slate-800">
+              <span className="text-[11px] font-semibold text-slate-400 flex items-center gap-1.5 pl-1">
+                <Globe size={13} className="text-[#E85D43]" />
+                <span>Language Detected:</span>
               </span>
               <div className="flex items-center gap-1">
-                <button
-                  onClick={() => handleSetLanguage('english')}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
-                    langPref === 'english' || (langPref === 'auto' && currentLang === 'english')
-                      ? 'bg-[#E85D43] text-white shadow-xs'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                  }`}
-                >
-                  English
-                </button>
-                <button
-                  onClick={() => handleSetLanguage('hinglish')}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
-                    langPref === 'hinglish' || (langPref === 'auto' && currentLang === 'hinglish')
-                      ? 'bg-[#E85D43] text-white shadow-xs'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                  }`}
-                >
-                  Hinglish
-                </button>
-                <button
-                  onClick={() => handleSetLanguage('hindi')}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
-                    langPref === 'hindi' || (langPref === 'auto' && currentLang === 'hindi')
-                      ? 'bg-[#E85D43] text-white shadow-xs'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                  }`}
-                >
-                  हिन्दी
-                </button>
+                <div className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-[#E85D43]/20 border border-[#E85D43]/50 text-[#E85D43] flex items-center gap-1.5 shadow-xs">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <span className="text-slate-300">Auto</span>
+                  <span className="text-slate-500">•</span>
+                  <span className="font-extrabold text-white">
+                    {currentLang === 'hindi' ? 'हिन्दी (Hindi)' : (currentLang === 'english' ? 'English' : 'Hinglish')}
+                  </span>
+                </div>
               </div>
             </div>
 
