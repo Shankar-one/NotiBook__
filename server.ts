@@ -6,7 +6,7 @@ import dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
 import { WebSocketServer } from 'ws';
 import { SemanticActionPlanner, DatabaseSnapshot } from './src/voice/SemanticActionPlanner';
-import { cleanExtractedCustomerName, FORBIDDEN_CUSTOMER_PHRASES } from './src/voice/CustomerResolver';
+import { cleanExtractedCustomerName, FORBIDDEN_CUSTOMER_PHRASES, resolveCustomerAgainstDatabase } from './src/voice/CustomerResolver';
 import { SemanticActionPlan, ExecutionResult, PendingConfirmation, StrictVoiceIntent } from './src/voice/types';
 import { detectLanguage, toDevanagariForHindiTTS, prepareEnglishForTTS, isConfirmationUtterance, isCancellationUtterance } from './src/voice/LanguageUtils';
 
@@ -547,27 +547,30 @@ const planner = new SemanticActionPlanner(apiKey);
 
 const MUTATING_VOICE_INTENTS = new Set<string>([
   'ADD_RECEIVABLE',
+  'ADD_PAYABLE',
   'ADD_PAYMENT_GIVEN',
   'RECORD_PAYMENT_RECEIVED',
-  'CREATE_CUSTOMER',
   'UPDATE_TRANSACTION',
   'DELETE_TRANSACTION',
+  'DELETE_CUSTOMER',
 ]);
 
-function getIntentSummaryTitle(intent: StrictVoiceIntent, lang: 'hindi' | 'hinglish' | 'english'): string {
+function getIntentSummaryTitle(intent: StrictVoiceIntent, _lang?: 'hindi' | 'hinglish' | 'english'): string {
   switch (intent) {
     case 'ADD_RECEIVABLE':
-      return lang === 'hindi' ? 'उधार / लेनदारी जोड़ें (Add Receivable)' : 'Add Receivable (Udhar Lena)';
+      return 'Add Receivable';
+    case 'ADD_PAYABLE':
+      return 'Add Payable';
     case 'ADD_PAYMENT_GIVEN':
-      return lang === 'hindi' ? 'भुगतान दिया गया (Payment Given)' : 'Add Payment Given (Paisa Diya)';
+      return 'Add Payment Given';
     case 'RECORD_PAYMENT_RECEIVED':
-      return lang === 'hindi' ? 'भुगतान प्राप्त हुआ (Payment Received)' : 'Record Payment Received (Jama)';
+      return 'Record Payment Received';
     case 'CREATE_CUSTOMER':
-      return lang === 'hindi' ? 'नया ग्राहक जोड़ें (Create Customer)' : 'Create New Customer';
+      return 'Create New Customer';
     case 'UPDATE_TRANSACTION':
-      return lang === 'hindi' ? 'लेनदेन अपडेट करें (Update Entry)' : 'Update Transaction';
+      return 'Update Transaction';
     case 'DELETE_TRANSACTION':
-      return lang === 'hindi' ? 'लेनदेन हटाएं (Delete Entry)' : 'Delete Transaction';
+      return 'Delete Transaction';
     default:
       return 'Confirm Action';
   }
@@ -575,69 +578,51 @@ function getIntentSummaryTitle(intent: StrictVoiceIntent, lang: 'hindi' | 'hingl
 
 function buildPreSaveConfirmationPrompt(
   pending: PendingConfirmation,
-  rawLang: 'hindi' | 'hinglish' | 'english'
+  _rawLang?: 'hindi' | 'hinglish' | 'english'
 ): string {
-  const isHindi = rawLang !== 'english';
   const name = pending.personName || 'Customer';
   const amtStr = pending.amount ? `₹${pending.amount.toLocaleString('en-IN')}` : '';
 
   if (pending.intent === 'ADD_RECEIVABLE') {
-    if (isHindi) {
-      return `${name} से ${amtStr} लेने हैं। सेव करने के लिए "Confirm & Save" बटन दबाएं या "हाँ" बोलें।`;
-    }
     return `Add ${amtStr} receivable from ${name}. Please tap "Confirm & Save" or say "Yes" to save.`;
   }
 
+  if (pending.intent === 'ADD_PAYABLE') {
+    return `Add ${amtStr} payable to ${name}. Please tap "Confirm & Save" or say "Yes" to save.`;
+  }
+
   if (pending.intent === 'ADD_PAYMENT_GIVEN') {
-    if (isHindi) {
-      return `${name} को ${amtStr} दिए गए हैं। सेव करने के लिए "Confirm & Save" बटन दबाएं या "हाँ" बोलें।`;
-    }
     return `Record ${amtStr} payment given to ${name}. Please tap "Confirm & Save" or say "Yes" to save.`;
   }
 
   if (pending.intent === 'RECORD_PAYMENT_RECEIVED') {
-    if (isHindi) {
-      return `${name} से ${amtStr} वापस प्राप्त हुए। सेव करने के लिए "Confirm & Save" बटन दबाएं या "हाँ" बोलें।`;
-    }
     return `Record ${amtStr} payment received from ${name}. Please tap "Confirm & Save" or say "Yes" to save.`;
   }
 
   if (pending.intent === 'CREATE_CUSTOMER') {
-    if (isHindi) {
-      return `"${name}" नाम से नया ग्राहक बनाना है। सेव करने के लिए "Confirm & Save" दबाएं।`;
-    }
     return `Create new customer "${name}". Please tap "Confirm & Save" to confirm.`;
   }
 
   if (pending.intent === 'DELETE_TRANSACTION') {
-    if (isHindi) {
-      return `${name} की पिछली एंट्री हटानी है। पुष्टि करने के लिए "Confirm & Save" दबाएं।`;
-    }
     return `Delete the last transaction for ${name}. Please tap "Confirm & Save" to confirm.`;
   }
 
   if (pending.intent === 'UPDATE_TRANSACTION') {
-    if (isHindi) {
-      return `${name} की एंट्री को ${amtStr} पर अपडेट करना है। पुष्टि करने के लिए "Confirm & Save" दबाएं।`;
-    }
     return `Update ${name}'s transaction to ${amtStr}. Please tap "Confirm & Save" to confirm.`;
   }
 
-  return isHindi
-    ? 'कृपया सेव करने के लिए "Confirm & Save" दबाएं।'
-    : 'Please tap "Confirm & Save" to confirm.';
+  return 'Please tap "Confirm & Save" to confirm.';
 }
 
 function executeConfirmedMutation(
   confirmation: PendingConfirmation,
-  context: any
+  _context: any
 ) {
   const executionResults: any[] = [];
   const toolCalls: any[] = [];
   let activeCustomerTarget: any = null;
   let latestTransactionCreated: any = null;
-  const rawLang: 'hindi' | 'hinglish' | 'english' = confirmation.lang || 'hindi';
-  const isHindi = rawLang !== 'english';
+  const isHindi = false;
 
   const cleanName = cleanExtractedCustomerName(confirmation.personName) || confirmation.personName.trim();
   const amt = Number(confirmation.amount) || 0;
@@ -746,7 +731,7 @@ function executeConfirmedMutation(
     return { reply, executionResults, toolCalls, activeCustomerTarget, latestTransactionCreated };
   }
 
-  if (intent === 'RECORD_PAYMENT_RECEIVED') {
+  if (intent === 'RECORD_PAYMENT_RECEIVED' || intent === 'ADD_PAYABLE') {
     const { customer: cust, createdNew } = findOrCreateCustomer(cleanName);
     const prevBal = cust.balance;
     cust.balance -= amt;
@@ -757,8 +742,10 @@ function executeConfirmedMutation(
       id: `tx-${Date.now()}`,
       date: new Date().toLocaleString('en-IN', { hour12: false }),
       type: 'in',
-      category: 'Customer Payment',
-      description: confirmation.description || `Payment received from ${cust.name}`,
+      category: intent === 'ADD_PAYABLE' ? 'Payable (Dena)' : 'Customer Payment',
+      description:
+        confirmation.description ||
+        (intent === 'ADD_PAYABLE' ? `Payable to ${cust.name}` : `Payment received from ${cust.name}`),
       partyName: cust.name,
       paymentMode,
       amount: amt,
@@ -788,6 +775,13 @@ function executeConfirmedMutation(
       newBal: cust.balance,
       createdNew,
     });
+
+    if (intent === 'ADD_PAYABLE') {
+      const reply = isHindi
+        ? `${cust.name} को देने के लिए ₹${amt.toLocaleString('en-IN')} खाते में दर्ज कर दिए गए हैं।`
+        : `Saved! Recorded ₹${amt.toLocaleString('en-IN')} payable to ${cust.name}.`;
+      return { reply, executionResults, toolCalls, activeCustomerTarget, latestTransactionCreated };
+    }
 
     const isSettled = cust.balance <= 0;
     const reply = isHindi
@@ -849,11 +843,9 @@ function executeConfirmedMutation(
 function generateTruthfulResponse(
   plan: SemanticActionPlan,
   results: any[],
-  rawLang: 'hindi' | 'hinglish' | 'english',
+  _rawLang: 'hindi' | 'hinglish' | 'english',
   targetCustomer?: any
 ): string {
-  const lang: 'hindi' | 'hinglish' | 'english' = rawLang === 'english' ? 'english' : 'hindi';
-
   // If plan has clarification question, return it
   if (plan.clarificationQuestion && results.length === 0) {
     return plan.clarificationQuestion;
@@ -861,7 +853,6 @@ function generateTruthfulResponse(
 
   // 1. END CONVERSATION
   if (plan.primaryIntent === 'END_CONVERSATION') {
-    if (lang === 'hindi') return 'ठीक है, बहुत धन्यवाद! आपका दिन शुभ हो।';
     return 'Alright, thank you! Have a great day.';
   }
 
@@ -869,11 +860,9 @@ function generateTruthfulResponse(
   const cancelRes = results.find(r => r.action === 'CANCEL_LAST_ACTION');
   if (cancelRes) {
     if (cancelRes.success && cancelRes.undoneTx) {
-      return lang === 'hindi'
-        ? `पिछली ₹${cancelRes.undoneTx.amount.toLocaleString('en-IN')} की एंट्री वापस ले ली गई है।`
-        : `Undid the last ₹${cancelRes.undoneTx.amount.toLocaleString('en-IN')} transaction.`;
+      return `Undid the last ₹${cancelRes.undoneTx.amount.toLocaleString('en-IN')} transaction.`;
     }
-    return lang === 'hindi' ? 'कोई पिछला एक्शन रद्द करने के लिए नहीं है।' : 'No recent action to cancel.';
+    return 'No recent action to cancel.';
   }
 
   // 3. NAVIGATE
@@ -881,14 +870,23 @@ function generateTruthfulResponse(
   const balRes = results.find(r => r.action === 'GET_CUSTOMER_BALANCE' || r.action === 'GET_LEDGER');
   if (navResult && !balRes) {
     const dest = (navResult as any).destination || 'page';
-    const friendlyName = dest === 'customers' ? (lang === 'hindi' ? 'कस्टमर लिस्ट' : 'Customers page') :
-      dest === 'transactions' ? (lang === 'hindi' ? 'लेनदेन पासबुक' : 'Transactions passbook') :
-      dest === 'billing' ? (lang === 'hindi' ? 'बिलिंग व इनवॉइस' : 'Billing tab') :
-      dest === 'stocks' ? (lang === 'hindi' ? 'स्टॉक व इन्वेंट्री' : 'Stocks inventory') :
-      dest === 'customer_ledger_modal' ? (targetCustomer ? `${targetCustomer.name} का खाता` : 'Customer ledger') :
-      dest === 'settings_modal' ? 'Settings' : dest;
+    const friendlyName =
+      dest === 'customers'
+        ? 'Customers page'
+        : dest === 'transactions'
+        ? 'Transactions passbook'
+        : dest === 'billing'
+        ? 'Billing tab'
+        : dest === 'stocks'
+        ? 'Stocks inventory'
+        : dest === 'customer_ledger_modal'
+        ? targetCustomer
+          ? `${targetCustomer.name}'s ledger`
+          : 'Customer ledger'
+        : dest === 'settings_modal'
+        ? 'Settings'
+        : dest;
 
-    if (lang === 'hindi') return `${friendlyName} खोल दिया गया है।`;
     return `Opening ${friendlyName}.`;
   }
 
@@ -898,13 +896,10 @@ function generateTruthfulResponse(
     const bal = balRes.balance ?? targetCustomer?.balance ?? 0;
 
     if (bal > 0) {
-      if (lang === 'hindi') return `${custName} से ₹${bal.toLocaleString('en-IN')} लेने हैं (बकाया)।`;
       return `${custName}'s outstanding receivable balance is ₹${bal.toLocaleString('en-IN')}.`;
     } else if (bal < 0) {
-      if (lang === 'hindi') return `${custName} का ₹${Math.abs(bal).toLocaleString('en-IN')} एडवांस जमा है।`;
       return `${custName} has an advance balance of ₹${Math.abs(bal).toLocaleString('en-IN')}.`;
     } else {
-      if (lang === 'hindi') return `${custName} का खाता बिल्कुल चुकता है, कोई बकाया नहीं है।`;
       return `${custName}'s account is fully settled with zero dues.`;
     }
   }
@@ -913,7 +908,6 @@ function generateTruthfulResponse(
   const summaryRes = results.find(r => r.action === 'GET_ACCOUNT_SUMMARY' || r.action === 'GET_TOTAL_RECEIVABLE');
   if (summaryRes && summaryRes.success) {
     const total = summaryRes.totalReceivables ?? 0;
-    if (lang === 'hindi') return `मार्केट से कुल ₹${total.toLocaleString('en-IN')} लेने हैं।`;
     return `Total receivables across all customers are ₹${total.toLocaleString('en-IN')}.`;
   }
 
@@ -921,7 +915,6 @@ function generateTruthfulResponse(
   const payableRes = results.find(r => r.action === 'GET_TOTAL_PAYABLE');
   if (payableRes && payableRes.success) {
     const totalPayable = payableRes.totalPayables ?? 0;
-    if (lang === 'hindi') return `कुल देनदारी ₹${totalPayable.toLocaleString('en-IN')} है।`;
     return `Total payable balance is ₹${totalPayable.toLocaleString('en-IN')}.`;
   }
 
@@ -931,16 +924,13 @@ function generateTruthfulResponse(
     const custName = histRes.customer?.name || targetCustomer?.name;
     const latest = histRes.latest;
     if (latest) {
-      const typeStr = latest.type === 'in' ? (lang === 'hindi' ? 'प्राप्त' : 'received') : (lang === 'hindi' ? 'उधार/भुगतान' : 'given');
-      if (lang === 'hindi') return `${custName || latest.partyName} का पिछला लेनदेन ₹${latest.amount.toLocaleString('en-IN')} (${typeStr}) का था।`;
-      return `Last transaction for ${custName || latest.partyName} was ₹${latest.amount.toLocaleString('en-IN')} (${typeStr}).`;
+      const typeStr = latest.type === 'in' ? 'received' : 'receivable';
+      return `Latest transaction for ${custName || latest.partyName} was ₹${latest.amount.toLocaleString('en-IN')} (${typeStr}).`;
     } else {
-      if (lang === 'hindi') return `${custName || 'ग्राहक'} के लिए कोई पिछला लेनदेन नहीं मिला।`;
       return `No previous transactions found${custName ? ` for ${custName}` : ''}.`;
     }
   }
 
-  if (lang === 'hindi') return 'समझ गया, कार्य पूरा कर दिया गया है।';
   return 'Understood, action completed.';
 }
 
@@ -959,13 +949,9 @@ app.post('/api/voice/transcribe', async (req, res) => {
     const cleanBase64 = String(audioData).replace(/^data:audio\/[^;]+;base64,/, '').trim();
     const rawMime = mimeType ? String(mimeType).split(';')[0].trim() : 'audio/webm';
 
-    const langDirective = language === 'hindi'
-      ? 'Transcribe strictly in Hindi (Devanagari script).'
-      : language === 'english'
-      ? 'Transcribe in English.'
-      : 'Transcribe verbatim in the language spoken (Hindi, Hinglish, or English).';
+    const langDirective = 'Transcribe strictly in English.';
 
-    const candidateModels = ['gemini-3-flash-preview', 'gemini-2.5-flash'];
+    const candidateModels = ['gemini-3-flash-preview', 'gemini-3.5-transcribe', 'gemini-3.8-flash'];
     let transcribedText = '';
 
     for (const model of candidateModels) {
@@ -1011,19 +997,18 @@ CRITICAL RULES:
   }
 });
 
-// Automatic Multilingual Voice TTS Endpoint (English -> English Voice, Hindi -> Hindi Voice)
+// English Voice TTS Endpoint
 app.post('/api/voice/tts', async (req, res) => {
   try {
-    const { text, lang } = req.body;
+    const { text } = req.body;
     const rawText = String(text || '').trim();
     if (!rawText) {
       return res.status(400).json({ error: 'Text is required' });
     }
 
-    const detected = (lang === 'english' || lang === 'hindi') ? lang : detectLanguage(rawText);
-    const isHindi = detected !== 'english' || /[\u0900-\u097F]/.test(rawText);
-    const spokenText = isHindi ? toDevanagariForHindiTTS(rawText) : prepareEnglishForTTS(rawText);
-    const targetTl = isHindi ? 'hi' : 'en';
+    const isHindi = false;
+    const spokenText = prepareEnglishForTTS(rawText);
+    const targetTl = 'en';
 
     // 1. Primary: Native language neural TTS (hi-IN voice for Hindi, en-US voice for English)
     try {
@@ -1122,10 +1107,10 @@ app.post('/api/voice/confirm', (req, res) => {
               balance: activeCustomerTarget.balance,
             }
           : context?.activeCustomer,
-        pendingConfirmation: undefined,
+        pendingConfirmation: null as any,
         pendingClarification: undefined,
         lastAction: confirmation.intent,
-        detectedLanguage: confirmation.lang || 'hindi',
+        detectedLanguage: 'english',
       },
     });
   } catch (err: any) {
@@ -1135,17 +1120,17 @@ app.post('/api/voice/confirm', (req, res) => {
 });
 
 app.post('/api/voice/chat', async (req, res) => {
-  const { message, context, userLanguage } = req.body;
+  const { message, context } = req.body;
   const rawMessage = String(message || '').trim();
 
   if (!rawMessage) {
     return res.json({
-      reply: userLanguage === 'english' ? 'Yes, I am listening.' : 'हाँ, मैं सुन रहा हूँ।',
+      reply: 'Yes, I am listening.',
       actions: [],
     });
   }
 
-  const autoDetectedLang = detectLanguage(rawMessage);
+  const autoDetectedLang: 'english' = 'english';
 
   // 0. If there is a pendingConfirmation in context and the user spoke a direct confirmation or cancellation
   if (context?.pendingConfirmation) {
@@ -1176,29 +1161,25 @@ app.post('/api/voice/chat', async (req, res) => {
                 balance: activeCustomerTarget.balance,
               }
             : context?.activeCustomer,
-          pendingConfirmation: undefined,
+          pendingConfirmation: null as any,
           pendingClarification: undefined,
           lastAction: pending.intent,
-          detectedLanguage: pending.lang || autoDetectedLang,
+          detectedLanguage: 'english',
         },
       });
     }
 
     if (isCancellationUtterance(rawMessage)) {
-      const isHindi = (pending.lang || autoDetectedLang) !== 'english';
-      const cancelReply = isHindi
-        ? 'ठीक है, यह एंट्री रद्द (Cancel) कर दी गई है। कोई बदलाव सेव नहीं किया गया।'
-        : 'Cancelled. No changes were saved to the ledger.';
       return res.json({
-        reply: cancelReply,
+        reply: 'Cancelled. No changes were saved to the ledger.',
         requiresConfirmation: false,
         executionResults: [],
         toolCalls: [],
         updatedContext: {
           ...context,
-          pendingConfirmation: undefined,
+          pendingConfirmation: null as any,
           pendingClarification: undefined,
-          detectedLanguage: pending.lang || autoDetectedLang,
+          detectedLanguage: 'english',
         },
       });
     }
@@ -1215,23 +1196,111 @@ app.post('/api/voice/chat', async (req, res) => {
     totalPayables,
   };
 
-  // 2. Generate Semantic Action Plan & Auto-Detect Language (Hindi vs English)
+  // 2. Generate Semantic Action Plan (Phase 1: English-only)
   const plan = await planner.plan(rawMessage, context || { recentTurns: [] }, dbSnapshot);
-  const userLang: 'hindi' | 'hinglish' | 'english' =
-    autoDetectedLang === 'english' && plan.detectedLanguage === 'english'
-      ? 'english'
-      : autoDetectedLang === 'hindi'
-      ? 'hindi'
-      : plan.detectedLanguage === 'english'
-      ? 'english'
-      : 'hindi';
+  const userLang: 'hindi' | 'hinglish' | 'english' = 'english';
 
   const interp = plan.structuredInterpretation;
   console.log(
     `[SemanticEngine] Utterance: "${rawMessage}" => Intent: [${plan.primaryIntent}], Person: [${interp?.person_name ?? 'none'}], Amount: [${interp?.amount ?? 'none'}], RequiresConfirmation: [${plan.requiresConfirmation}], Language: [${userLang}]`
   );
 
-  // 3. Check for genuine missing information, ambiguity, or direct clarification
+  // 3. Handle CONFIRM / CANCEL / MODIFY_PENDING when a PendingConfirmation is active
+  const primaryIntentStr = String(plan.primaryIntent || interp?.intent || '');
+  if (context?.pendingConfirmation) {
+    const pending: PendingConfirmation = context.pendingConfirmation;
+    if (primaryIntentStr === 'CONFIRM') {
+      const {
+        reply,
+        executionResults,
+        toolCalls,
+        activeCustomerTarget,
+        latestTransactionCreated,
+      } = executeConfirmedMutation(pending, context);
+
+      return res.json({
+        reply,
+        requiresConfirmation: false,
+        executionResults,
+        updatedCustomer: activeCustomerTarget,
+        newTransaction: latestTransactionCreated,
+        toolCall: toolCalls[0],
+        toolCalls,
+        updatedContext: {
+          activeCustomer: activeCustomerTarget
+            ? {
+                id: activeCustomerTarget.id,
+                name: activeCustomerTarget.name,
+                phone: activeCustomerTarget.phone,
+                balance: activeCustomerTarget.balance,
+              }
+            : context?.activeCustomer,
+          pendingConfirmation: null as any,
+          pendingClarification: undefined,
+          lastAction: pending.intent,
+          detectedLanguage: userLang,
+        },
+      });
+    }
+
+    if (primaryIntentStr === 'CANCEL') {
+      const cancelReply = 'Cancelled. No changes were saved to the ledger.';
+      return res.json({
+        reply: cancelReply,
+        requiresConfirmation: false,
+        executionResults: [],
+        toolCalls: [],
+        updatedContext: {
+          ...context,
+          pendingConfirmation: null as any,
+          pendingClarification: undefined,
+          detectedLanguage: userLang,
+        },
+      });
+    }
+
+    if (primaryIntentStr === 'MODIFY_PENDING') {
+      const updatedAmount = interp?.amount ?? plan.entities?.amount ?? pending.amount;
+      const updatedPerson =
+        cleanExtractedCustomerName(interp?.person_name || plan.entities?.customerName || '') ||
+        pending.personName;
+      const existingBal = pending.existingBalance ?? 0;
+      const delta =
+        pending.intent === 'RECORD_PAYMENT_RECEIVED' || pending.intent === 'ADD_PAYABLE'
+          ? -(updatedAmount || 0)
+          : updatedAmount || 0;
+
+      const updatedPending: PendingConfirmation = {
+        ...pending,
+        personName: updatedPerson,
+        amount: updatedAmount,
+        newBalancePreview: updatedAmount !== null ? existingBal + delta : existingBal,
+        lang: userLang,
+      };
+      const modReply =
+        userLang === 'english'
+          ? `Updated the pending entry for ${updatedPending.personName} to ₹${(updatedAmount || 0).toLocaleString('en-IN')}. Please tap "Confirm & Save" or say "Yes" to save.`
+          : `${updatedPending.personName} के लिए राशि अपडेट करके ₹${(updatedAmount || 0).toLocaleString('en-IN')} कर दी गई है। सेव करने के लिए "Confirm & Save" दबाएं या "हाँ" बोलें।`;
+      updatedPending.message = modReply;
+
+      return res.json({
+        reply: modReply,
+        plan,
+        structuredInterpretation: interp,
+        requiresConfirmation: true,
+        pendingConfirmation: updatedPending,
+        executionResults: [],
+        toolCalls: [],
+        updatedContext: {
+          ...context,
+          pendingConfirmation: updatedPending,
+          detectedLanguage: userLang,
+        },
+      });
+    }
+  }
+
+  // 3b. Check for genuine missing information, ambiguity, or direct clarification
   if (
     plan.clarificationQuestion &&
     (plan.actions.length === 0 || plan.missingInformation.length > 0 || plan.ambiguities.length > 0)
@@ -1260,34 +1329,121 @@ app.post('/api/voice/chat', async (req, res) => {
     });
   }
 
-  // 4. CRITICAL ARCHITECTURE RULE:
-  // If the intent is MUTATING (ADD_RECEIVABLE, ADD_PAYMENT_GIVEN, RECORD_PAYMENT_RECEIVED, CREATE_CUSTOMER, UPDATE_TRANSACTION, DELETE_TRANSACTION),
-  // DO NOT mutate the database yet! Return a PendingConfirmation for human confirmation.
-  const primaryIntentStr = String(plan.primaryIntent || interp?.intent || '');
+  // 4. Handle CREATE_CUSTOMER (either standalone or as first step of a compound command)
+  // Creates the customer in the real database immediately and assigns a real DB ID to activeCustomer.
+  const hasCreateCustomerAction =
+    primaryIntentStr === 'CREATE_CUSTOMER' ||
+    plan.actions?.some(a => a.action === 'CREATE_CUSTOMER');
+  let preCreatedCustomer: any = null;
+  const preCreatedToolCalls: any[] = [];
+  const preCreatedResults: any[] = [];
+
+  if (hasCreateCustomerAction) {
+    const rawCustName =
+      interp?.person_name ||
+      plan.entities?.customerName ||
+      plan.actions?.find(a => a.action === 'CREATE_CUSTOMER')?.parameters?.customerName ||
+      '';
+    const cleanCustName = cleanExtractedCustomerName(rawCustName);
+    if (cleanCustName) {
+      const dbMatch = resolveCustomerAgainstDatabase(cleanCustName, customers as any);
+      if (dbMatch.customer) {
+        preCreatedCustomer = dbMatch.customer;
+        preCreatedResults.push({ action: 'CREATE_CUSTOMER', success: true, customer: preCreatedCustomer, existed: true });
+      } else {
+        const newCust = {
+          id: `cust-${Date.now()}`,
+          name: cleanCustName,
+          phone: '',
+          address: '',
+          balance: 0,
+          lastTransactionDate: new Date().toISOString().slice(0, 10),
+          status: 'settled' as const,
+          createdAt: new Date().toISOString().slice(0, 10),
+        };
+        customers.unshift(newCust);
+        preCreatedCustomer = newCust;
+        preCreatedToolCalls.push({
+          name: 'add_customer',
+          args: { name: newCust.name, phone: newCust.phone, customer: newCust },
+        });
+        preCreatedResults.push({ action: 'CREATE_CUSTOMER', success: true, customer: newCust, existed: false });
+      }
+    }
+
+    // If this was a standalone CREATE_CUSTOMER command, return the real database result & activeCustomer immediately!
+    if (primaryIntentStr === 'CREATE_CUSTOMER' && !MUTATING_VOICE_INTENTS.has(interp?.intent || '')) {
+      const naturalReply =
+        (await planner.generateNaturalResponse({
+          userUtterance: rawMessage,
+          plan,
+          executionResults: preCreatedResults,
+          activeCustomer: preCreatedCustomer,
+          userLang,
+        })) ||
+        (userLang === 'english'
+          ? `Customer "${preCreatedCustomer?.name || cleanCustName}" has been created in your ledger.`
+          : `नया ग्राहक "${preCreatedCustomer?.name || cleanCustName}" आपके खाते में बना दिया गया है।`);
+
+      return res.json({
+        reply: naturalReply,
+        plan,
+        structuredInterpretation: interp,
+        requiresConfirmation: false,
+        executionResults: preCreatedResults,
+        updatedCustomer: preCreatedCustomer,
+        toolCall: preCreatedToolCalls[0],
+        toolCalls: preCreatedToolCalls,
+        updatedContext: {
+          activeCustomer: preCreatedCustomer
+            ? {
+                id: preCreatedCustomer.id,
+                name: preCreatedCustomer.name,
+                phone: preCreatedCustomer.phone,
+                balance: preCreatedCustomer.balance,
+              }
+            : context?.activeCustomer,
+          lastEntity: preCreatedCustomer
+            ? { type: 'customer', id: preCreatedCustomer.id, name: preCreatedCustomer.name }
+            : context?.lastEntity,
+          pendingConfirmation: null as any,
+          pendingClarification: undefined,
+          lastAction: 'CREATE_CUSTOMER',
+          detectedLanguage: userLang,
+        },
+      });
+    }
+  }
+
+  // 5. Financial Write Intents: Require Human Confirmation before mutating balances/transactions
   if (MUTATING_VOICE_INTENTS.has(primaryIntentStr) || plan.requiresConfirmation) {
     const strictIntent = (interp?.intent || primaryIntentStr) as StrictVoiceIntent;
     const personName =
+      preCreatedCustomer?.name ||
       interp?.person_name ||
       plan.entities?.customerName ||
       context?.activeCustomer?.name ||
       'Customer';
     const amount = interp?.amount ?? plan.entities?.amount ?? null;
-    const existingCust = customers.find(
-      c =>
-        c.name.toLowerCase() === personName.toLowerCase() ||
-        c.name.toLowerCase().startsWith(personName.toLowerCase() + ' ')
-    );
+    const dbMatch = preCreatedCustomer
+      ? { customer: preCreatedCustomer }
+      : resolveCustomerAgainstDatabase(personName, customers as any);
+    const existingCust = dbMatch.customer;
     const existingBal = existingCust ? existingCust.balance : 0;
-    const delta = strictIntent === 'RECORD_PAYMENT_RECEIVED' ? -(amount || 0) : (amount || 0);
+    const delta =
+      strictIntent === 'RECORD_PAYMENT_RECEIVED' || strictIntent === 'ADD_PAYABLE'
+        ? -(amount || 0)
+        : amount || 0;
     const newBalPreview = amount !== null ? existingBal + delta : existingBal;
 
     const pendingConfirmation: PendingConfirmation = {
       id: `confirm-${Date.now()}`,
       action: 'execute_intent',
       intent: strictIntent,
-      secondaryIntent: interp?.secondary_intent || (!existingCust && strictIntent !== 'CREATE_CUSTOMER' ? 'CREATE_CUSTOMER' : null),
+      secondaryIntent: !existingCust ? 'CREATE_CUSTOMER' : null,
       personName: existingCust ? existingCust.name : personName,
       customerId: existingCust?.id,
+      customer_id: existingCust?.id,
       amount,
       currency: 'INR',
       description: interp?.description || plan.entities?.note || null,
@@ -1311,10 +1467,20 @@ app.post('/api/voice/chat', async (req, res) => {
       structuredInterpretation: interp,
       requiresConfirmation: true,
       pendingConfirmation,
-      executionResults: [],
-      toolCalls: [],
+      executionResults: preCreatedResults,
+      updatedCustomer: preCreatedCustomer || existingCust,
+      toolCall: preCreatedToolCalls[0],
+      toolCalls: preCreatedToolCalls,
       updatedContext: {
         ...context,
+        activeCustomer: (preCreatedCustomer || existingCust)
+          ? {
+              id: (preCreatedCustomer || existingCust).id,
+              name: (preCreatedCustomer || existingCust).name,
+              phone: (preCreatedCustomer || existingCust).phone,
+              balance: (preCreatedCustomer || existingCust).balance,
+            }
+          : context?.activeCustomer,
         pendingConfirmation,
         pendingClarification: undefined,
         detectedLanguage: userLang,
@@ -1322,10 +1488,30 @@ app.post('/api/voice/chat', async (req, res) => {
     });
   }
 
-  // 5. Read-Only & Navigation Execution Engine (Executes immediately without confirmation)
+  // 6. Read-Only & Navigation Execution Engine (Executes immediately without confirmation)
   const executionResults: any[] = [];
   const toolCalls: any[] = [];
   let activeCustomerTarget: any = null;
+
+  const resolveCustomerParam = (params: any): any => {
+    if (params.customerId) {
+      const byId = customers.find(c => c.id === params.customerId);
+      if (byId) return byId;
+    }
+    if (params.customerName) {
+      const resMatch = resolveCustomerAgainstDatabase(params.customerName, customers as any);
+      if (resMatch.customer) return resMatch.customer;
+    }
+    if (context?.activeCustomer?.id) {
+      const byCtxId = customers.find(c => c.id === context.activeCustomer.id);
+      if (byCtxId) return byCtxId;
+    }
+    if (context?.activeCustomer?.name) {
+      const byCtxName = resolveCustomerAgainstDatabase(context.activeCustomer.name, customers as any);
+      if (byCtxName.customer) return byCtxName.customer;
+    }
+    return null;
+  };
 
   for (const item of plan.actions) {
     const act = item.action;
@@ -1333,37 +1519,39 @@ app.post('/api/voice/chat', async (req, res) => {
 
     try {
       if (act === 'NAVIGATE') {
-        const dest = params.destination || params.target || 'home';
+        const dest = params.destination || params.page || params.target || 'home';
         if (params.customerName) {
-          const found = customers.find(c => c.name.toLowerCase().includes(params.customerName.toLowerCase().trim()));
+          const found = resolveCustomerParam(params);
           if (found) activeCustomerTarget = found;
         }
         toolCalls.push({
           name: 'navigate',
           args: {
             target: dest,
-            customerName: params.customerName,
+            customerName: activeCustomerTarget?.name || null,
           },
         });
         executionResults.push({ action: act, success: true, destination: dest });
-      } else if (act === 'GET_CUSTOMER_BALANCE' || act === 'GET_LEDGER') {
-        let cust: any = null;
-        if (params.customerName) {
-          cust = customers.find(c => c.name.toLowerCase().includes(params.customerName.toLowerCase().trim()));
-        } else if (context?.activeCustomer?.id) {
-          cust = customers.find(c => c.id === context.activeCustomer.id);
-        }
+      } else if (
+        act === 'GET_BALANCE' ||
+        act === 'GET_CUSTOMER_BALANCE' ||
+        act === 'GET_LEDGER' ||
+        act === 'GET_CUSTOMER' ||
+        act === 'SEARCH_CUSTOMERS'
+      ) {
+        const cust = resolveCustomerParam(params);
         if (cust) {
           activeCustomerTarget = cust;
           toolCalls.push({
             name: 'get_balance',
             args: { customer_name: cust.name, balance: cust.balance },
           });
-          executionResults.push({ action: act, success: true, customer: cust, balance: cust.balance });
+          executionResults.push({ action: 'GET_CUSTOMER_BALANCE', success: true, customer: cust, balance: cust.balance });
         } else if (params.customerName) {
-          const notFoundMsg = userLang === 'english'
-            ? `Could not find any customer named "${params.customerName}".`
-            : `"${params.customerName}" नाम का कोई ग्राहक खाते में नहीं मिला।`;
+          const notFoundMsg =
+            userLang === 'english'
+              ? `Could not find any customer named "${params.customerName}".`
+              : `"${params.customerName}" नाम का कोई ग्राहक खाते में नहीं मिला।`;
           return res.json({
             reply: notFoundMsg,
             plan,
@@ -1373,27 +1561,40 @@ app.post('/api/voice/chat', async (req, res) => {
             toolCalls: [],
           });
         }
-      } else if (act === 'GET_CUSTOMER_HISTORY' || act === 'GET_TRANSACTIONS') {
-        let cust: any = null;
-        if (params.customerName) {
-          cust = customers.find(c => c.name.toLowerCase().includes(params.customerName.toLowerCase().trim()));
-        } else if (context?.activeCustomer?.id) {
-          cust = customers.find(c => c.id === context.activeCustomer.id);
-        }
+      } else if (
+        act === 'GET_CUSTOMER_HISTORY' ||
+        act === 'GET_TRANSACTIONS' ||
+        act === 'GET_LAST_TRANSACTION'
+      ) {
+        const cust = resolveCustomerParam(params);
         if (cust) {
           activeCustomerTarget = cust;
-          const custTxs = transactions.filter((t: any) => t.customerId === cust.id || t.partyName?.toLowerCase() === cust.name.toLowerCase());
+          const custTxs = transactions.filter(
+            (t: any) => t.customerId === cust.id || t.partyName?.toLowerCase() === cust.name.toLowerCase()
+          );
+          const limit = act === 'GET_LAST_TRANSACTION' ? 1 : 5;
           toolCalls.push({
             name: 'get_transactions',
-            args: { customer_name: cust.name, transactions: custTxs.slice(0, 5) },
+            args: { customer_name: cust.name, transactions: custTxs.slice(0, limit) },
           });
-          executionResults.push({ action: act, success: true, customer: cust, count: custTxs.length, latest: custTxs[0] });
+          executionResults.push({
+            action: 'GET_TRANSACTIONS',
+            success: true,
+            customer: cust,
+            count: custTxs.length,
+            latest: custTxs[0] || null,
+          });
         } else {
           toolCalls.push({
             name: 'get_transactions',
             args: { transactions: transactions.slice(0, 5) },
           });
-          executionResults.push({ action: act, success: true, count: transactions.length, latest: transactions[0] });
+          executionResults.push({
+            action: 'GET_TRANSACTIONS',
+            success: true,
+            count: transactions.length,
+            latest: transactions[0] || null,
+          });
         }
       } else if (act === 'GET_ACCOUNT_SUMMARY' || act === 'GET_TOTAL_RECEIVABLE') {
         const total = customers.filter(c => c.balance > 0).reduce((s, c) => s + c.balance, 0);
@@ -1427,7 +1628,14 @@ app.post('/api/voice/chat', async (req, res) => {
     }
   }
 
-  const reply = generateTruthfulResponse(plan, executionResults, userLang, activeCustomerTarget);
+  const reply =
+    (await planner.generateNaturalResponse({
+      userUtterance: rawMessage,
+      plan,
+      executionResults,
+      activeCustomer: activeCustomerTarget,
+      userLang,
+    })) || generateTruthfulResponse(plan, executionResults, userLang, activeCustomerTarget);
 
   return res.json({
     reply,
@@ -1445,6 +1653,7 @@ app.post('/api/voice/chat', async (req, res) => {
         phone: activeCustomerTarget.phone,
         balance: activeCustomerTarget.balance,
       } : context?.activeCustomer,
+      pendingConfirmation: null as any,
       pendingClarification: undefined,
       lastAction: plan.primaryIntent,
       detectedLanguage: userLang,

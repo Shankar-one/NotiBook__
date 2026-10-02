@@ -180,25 +180,31 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
     switch (intent) {
       case 'ADD_RECEIVABLE':
         return {
-          label: currentLang === 'english' ? 'ADD RECEIVABLE (Udhar / Collect)' : 'लेनदारी / उधार (ADD RECEIVABLE)',
+          label: 'RECEIVABLE',
           color: 'bg-amber-500/20 text-amber-300 border-amber-500/50',
           sign: '+',
         };
+      case 'ADD_PAYABLE':
+        return {
+          label: 'PAYABLE',
+          color: 'bg-rose-500/20 text-rose-300 border-rose-500/50',
+          sign: '-',
+        };
       case 'ADD_PAYMENT_GIVEN':
         return {
-          label: currentLang === 'english' ? 'PAYMENT GIVEN (You Gave)' : 'भुगतान दिया (PAYMENT GIVEN)',
+          label: 'PAYMENT GIVEN',
           color: 'bg-orange-500/20 text-orange-300 border-orange-500/50',
           sign: '+',
         };
       case 'RECORD_PAYMENT_RECEIVED':
         return {
-          label: currentLang === 'english' ? 'PAYMENT RECEIVED (Customer Paid)' : 'भुगतान मिला (PAYMENT RECEIVED)',
+          label: 'PAYMENT RECEIVED',
           color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50',
           sign: '-',
         };
       case 'CREATE_CUSTOMER':
         return {
-          label: currentLang === 'english' ? 'CREATE NEW CUSTOMER' : 'नया ग्राहक जोड़ें (CREATE CUSTOMER)',
+          label: 'CREATE CUSTOMER',
           color: 'bg-sky-500/20 text-sky-300 border-sky-500/50',
           sign: '',
         };
@@ -225,31 +231,29 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
 
   const getStatusTitle = (): string => {
     if (pendingConfirmation || voiceState === 'WAITING_FOR_CONFIRMATION') {
-      return currentLang === 'english' ? 'Review & Confirm Entry' : 'एंट्री की पुष्टि करें (Confirm Entry)';
+      return 'Review & Confirm Entry';
     }
     if (voiceState === 'CONNECTING') {
-      return currentLang === 'hindi' ? 'जार्विस से कनेक्ट हो रहा है...' : 'Connecting to Jarvis...';
+      return 'Connecting to Jarvis...';
     }
     if (voiceState === 'LISTENING') {
-      return currentLang === 'hindi' ? 'सुन रहा हूँ... बोलिए' : 'Listening to you...';
+      return 'Listening to you...';
     }
     if (voiceState === 'THINKING') {
-      return currentLang === 'hindi' ? 'जार्विस समझ रहा है...' : 'Interpreting command...';
+      return 'Interpreting command...';
     }
     if (voiceState === 'SPEAKING') {
-      return currentLang === 'hindi' ? 'जार्विस बोल रहा है' : 'Jarvis speaking';
+      return 'Jarvis speaking';
     }
     if (voiceState === 'ENDING') {
-      return currentLang === 'hindi' ? 'सेशन समाप्त हो रहा है...' : 'Session ending...';
+      return 'Session ending...';
     }
     if (voiceState === 'ERROR') {
-      return currentLang === 'hindi' ? '⚠️ माइक्रोफ़ोन अनुमति अनिवार्य' : '⚠️ Microphone Access Compulsory';
+      return '⚠️ Microphone Access Compulsory';
     }
     if (isWakeWordActive) {
-      if (currentLang === 'hindi') return '🎙️ "हे जार्विस" बोलें (वेक वर्ड सक्रिय)';
       return '🎙️ Say "Hey Jarvis" (Listening)';
     } else {
-      if (currentLang === 'hindi') return '🎙️ "हे जार्विस" चालू करने के लिए टैप करें';
       return '🎙️ Tap to Enable "Hey Jarvis"';
     }
   };
@@ -259,16 +263,13 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
       return `${pendingConfirmation.personName}${pendingConfirmation.amount ? ` • ₹${pendingConfirmation.amount.toLocaleString('en-IN')}` : ''}`;
     }
     if (voiceState === 'ERROR') {
-      return currentLang === 'hindi' ? 'माइक्रोफ़ोन अनुमति आवश्यक है — अनुमति देने के लिए क्लिक करें' : 'Microphone permission is required — Click to allow';
+      return 'Microphone permission is required — Click to allow';
     }
     if (interimTranscript) {
       return `🎙️ "${interimTranscript}"`;
     }
     if (voiceState === 'LISTENING') {
-      if (currentLang === 'hindi') {
-        return 'पूरा वाक्य बोलें... जैसे "राम से 500 लेने हैं"';
-      }
-      return 'Speak naturally... e.g. "Ram se 500 lene hain"';
+      return 'Speak naturally... e.g. "Add 1000 to Ramesh\'s account"';
     }
     if (voiceState === 'SPEAKING') {
       return lastMessage;
@@ -276,13 +277,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
     if (lastUserUtterance) {
       return lastUserUtterance;
     }
-    if (voiceState === 'IDLE') {
-      if (currentLang === 'hindi') {
-        return 'माइक पर टैप करें या "हे जार्विस" बोलें • हिंदी / इंग्लिश';
-      }
-      return 'Tap mic or say "Hey Jarvis" • Hindi / Hinglish / English';
-    }
-    return 'Speak naturally in Hindi, Hinglish, or English';
+    return 'Tap mic or say "Hey Jarvis" to start';
   };
 
   return (
@@ -343,13 +338,6 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
                 <span className="text-xs font-bold tracking-wide text-white truncate">
                   {getStatusTitle()}
                 </span>
-                <span className="text-[9px] uppercase px-1.5 py-0.5 rounded-md bg-slate-800 text-slate-300 font-bold border border-slate-700 shrink-0">
-                  {langPref === 'auto'
-                    ? `AUTO • ${currentLang === 'english' ? 'EN' : 'HI'}`
-                    : currentLang === 'english'
-                    ? 'EN'
-                    : 'HI'}
-                </span>
               </div>
 
               <div className="text-[11px] text-slate-300 truncate mt-0.5">
@@ -371,7 +359,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
                 aria-label="Process spoken sentence"
               >
                 <ArrowRight size={13} />
-                <span className="hidden sm:inline">{currentLang === 'hindi' ? 'प्रोसेस करें' : 'Process'}</span>
+                <span className="hidden sm:inline">Process</span>
               </button>
             )}
 
@@ -433,49 +421,6 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
         {/* Expanded Panel */}
         {(expanded || pendingConfirmation || saveSuccessMessage) && (
           <div className="p-4 bg-[#141A21]/95 border-t border-slate-800 space-y-3.5 text-xs">
-            {/* Voice Language Mode Selector */}
-            <div className="flex items-center justify-between gap-1 p-1.5 bg-slate-900/90 rounded-xl border border-slate-800">
-              <span className="text-[11px] font-semibold text-slate-400 pl-2 flex items-center gap-1.5">
-                <Globe size={12} className="text-[#E85D43]" />
-                <span>Language:</span>
-              </span>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => handleSetLanguage('auto')}
-                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
-                    langPref === 'auto'
-                      ? 'bg-[#E85D43] text-white shadow-xs'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                  }`}
-                >
-                  Auto ({currentLang === 'english' ? 'EN' : 'HI'})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSetLanguage('english')}
-                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
-                    langPref === 'english'
-                      ? 'bg-[#E85D43] text-white shadow-xs'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                  }`}
-                >
-                  English
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSetLanguage('hindi')}
-                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
-                    langPref === 'hindi' || langPref === 'hinglish'
-                      ? 'bg-[#E85D43] text-white shadow-xs'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                  }`}
-                >
-                  हिन्दी
-                </button>
-              </div>
-            </div>
-
             {/* Post-Save Success Banner */}
             {saveSuccessMessage && !pendingConfirmation && (
               <div
@@ -485,7 +430,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
               >
                 <div className="flex items-center gap-2 font-extrabold text-sm text-emerald-300">
                   <CheckCircle2 size={18} className="text-emerald-400 shrink-0" />
-                  <span>{currentLang === 'english' ? 'Saved Successfully!' : 'सफलतापूर्वक सेव हो गया! (Saved)'}</span>
+                  <span>Saved Successfully!</span>
                 </div>
                 <p className="text-xs text-emerald-100 leading-relaxed pl-6">
                   {saveSuccessMessage}
@@ -508,9 +453,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
                     {getIntentBadgeInfo(isEditingConfirmation ? editIntent : pendingConfirmation.intent).label}
                   </span>
                   <span className="text-[11px] font-semibold text-amber-300/90">
-                    {pendingConfirmation.customerExists
-                      ? (currentLang === 'english' ? 'Existing Customer' : 'मौजूदा ग्राहक')
-                      : (currentLang === 'english' ? '✨ New Customer' : '✨ नया ग्राहक बनेगा')}
+                    {pendingConfirmation.customerExists ? 'Existing Customer' : '✨ New Customer'}
                   </span>
                 </div>
 
@@ -520,7 +463,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
                     <div className="flex items-baseline justify-between gap-3">
                       <div>
                         <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
-                          {currentLang === 'english' ? 'Customer / Person' : 'ग्राहक का नाम (Person)'}
+                          Customer
                         </span>
                         <span className="text-base font-extrabold text-white">
                           {editPersonName || pendingConfirmation.personName}
@@ -529,7 +472,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
                       {(editAmount || pendingConfirmation.amount !== null) && (
                         <div className="text-right">
                           <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
-                            {currentLang === 'english' ? 'Amount (INR)' : 'राशि (Amount)'}
+                            Amount
                           </span>
                           <span className="text-xl font-black text-emerald-400">
                             ₹{Number(editAmount || pendingConfirmation.amount || 0).toLocaleString('en-IN')}
@@ -542,16 +485,16 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
                     {pendingConfirmation.amount !== null && pendingConfirmation.intent !== 'CREATE_CUSTOMER' && (
                       <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-300">
                         <span>
-                          {currentLang === 'english' ? 'Previous Balance:' : 'पुराना बकाया:'}{' '}
+                          Previous Balance:{' '}
                           <strong className="text-white">₹{(pendingConfirmation.existingBalance ?? 0).toLocaleString('en-IN')}</strong>
                         </span>
                         <span>→</span>
                         <span>
-                          {currentLang === 'english' ? 'New Balance:' : 'नया कुल बकाया:'}{' '}
+                          New Balance:{' '}
                           <strong className="text-amber-300">
                             ₹{(
                               (pendingConfirmation.existingBalance ?? 0) +
-                              (editIntent === 'RECORD_PAYMENT_RECEIVED'
+                              (editIntent === 'RECORD_PAYMENT_RECEIVED' || editIntent === 'ADD_PAYABLE'
                                 ? -Number(editAmount || pendingConfirmation.amount || 0)
                                 : Number(editAmount || pendingConfirmation.amount || 0))
                             ).toLocaleString('en-IN')}
@@ -565,7 +508,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
                   <div className="p-3 rounded-xl bg-slate-950 border border-slate-700 space-y-2.5">
                     <div>
                       <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
-                        {currentLang === 'english' ? 'Person / Customer Name' : 'ग्राहक का नाम (Person Name)'}
+                        Customer Name
                       </label>
                       <input
                         type="text"
@@ -579,7 +522,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
                       <div className="grid grid-cols-2 gap-2">
                         <div>
                           <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
-                            {currentLang === 'english' ? 'Amount (₹)' : 'राशि (₹ Amount)'}
+                            Amount (₹)
                           </label>
                           <input
                             type="number"
@@ -592,16 +535,17 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
                         </div>
                         <div>
                           <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
-                            {currentLang === 'english' ? 'Direction / Type' : 'लेनदेन का प्रकार'}
+                            Type
                           </label>
                           <select
                             value={editIntent}
                             onChange={(e) => setEditIntent(e.target.value as StrictVoiceIntent)}
                             className="w-full px-2.5 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white text-xs font-semibold focus:outline-none focus:border-emerald-500"
                           >
-                            <option value="ADD_RECEIVABLE">Receivable (लेने हैं)</option>
-                            <option value="ADD_PAYMENT_GIVEN">Payment Given (दिए)</option>
-                            <option value="RECORD_PAYMENT_RECEIVED">Payment Received (मिले)</option>
+                            <option value="ADD_RECEIVABLE">Receivable</option>
+                            <option value="ADD_PAYABLE">Payable</option>
+                            <option value="ADD_PAYMENT_GIVEN">Payment Given</option>
+                            <option value="RECORD_PAYMENT_RECEIVED">Payment Received</option>
                           </select>
                         </div>
                       </div>
@@ -609,7 +553,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
 
                     <div>
                       <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
-                        {currentLang === 'english' ? 'Note / Description (Optional)' : 'विवरण (Description)'}
+                        Note / Description (Optional)
                       </label>
                       <input
                         type="text"
@@ -683,7 +627,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
                 type="text"
                 value={typedCommand}
                 onChange={(e) => setTypedCommand(e.target.value)}
-                placeholder={currentLang === 'hindi' ? 'कमांड बोलें या यहाँ टाइप करें (जैसे: Ram se 500 lene hain)...' : 'Speak or type command (e.g. Ram se 500 lene hain)...'}
+                placeholder="Speak or type command (e.g. Add 1000 to Ramesh's account)..."
                 className="flex-1 bg-transparent px-2.5 py-1 text-xs text-white placeholder-slate-500 focus:outline-none"
               />
               <button
@@ -702,7 +646,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
                 <div className="flex items-start gap-2 p-2.5 rounded-xl bg-[#E85D43]/20 border border-[#E85D43]/50 text-amber-200 animate-pulse">
                   <span className="font-bold text-[#E85D43] shrink-0 text-[11px] uppercase tracking-wider flex items-center gap-1">
                     <span className="w-1.5 h-1.5 rounded-full bg-[#E85D43] animate-ping" />
-                    {currentLang === 'hindi' ? 'सुन रहा हूँ:' : 'Listening:'}
+                    Listening:
                   </span>
                   <span className="text-white font-medium italic">"{interimTranscript}..."</span>
                 </div>
@@ -711,7 +655,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
               {lastUserUtterance && (
                 <div className="flex items-start gap-2 p-2 rounded-xl bg-slate-900/80 border border-slate-800">
                   <span className="font-bold text-[#E85D43] shrink-0 text-[11px] uppercase tracking-wider">
-                    {currentLang === 'hindi' ? 'आप:' : 'You:'}
+                    You:
                   </span>
                   <span className="text-slate-200">{lastUserUtterance}</span>
                 </div>
@@ -722,7 +666,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
                   <Volume2 size={15} className="text-emerald-400 shrink-0 mt-0.5" />
                   <div className="flex-1 min-w-0">
                     <span className="font-bold text-emerald-400 block text-[10px] uppercase tracking-wider mb-0.5">
-                      {currentLang === 'hindi' ? 'जार्विस:' : 'Jarvis:'}
+                      Jarvis:
                     </span>
                     <span>{lastMessage}</span>
                   </div>
@@ -756,7 +700,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
               </div>
             )}
 
-            {/* Quick Voice Test Prompts (Hindi, Hinglish, English) */}
+            {/* Quick Voice Test Prompts (Uses the exact same semantic/action pipeline as spoken English) */}
             <div className="pt-2 border-t border-slate-800/80">
               <button
                 type="button"
@@ -765,7 +709,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
               >
                 <span className="flex items-center gap-1.5">
                   <SlidersHorizontal size={11} />
-                  <span>Test Hindi / Hinglish / English Commands</span>
+                  <span>Test English Commands</span>
                 </span>
                 <span>{showDevTestMode ? 'Hide ▲' : 'Show ▼'}</span>
               </button>
@@ -773,14 +717,14 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
               {showDevTestMode && (
                 <div className="mt-2 space-y-2 animate-in fade-in duration-200">
                   <div>
-                    <span className="text-[10px] font-bold text-slate-400 block mb-1 uppercase tracking-wider">Receivable (Lena Hai):</span>
+                    <span className="text-[10px] font-bold text-slate-400 block mb-1 uppercase tracking-wider">Customers &amp; Receivables:</span>
                     <div className="flex flex-wrap gap-1">
                       {[
-                        'Ram se 500 lene hain',
-                        'राम से 500 रुपये लेने हैं',
-                        'I need to collect 500 from Ram',
-                        'Ram se paanch sau lene hain',
-                        'Rahul se 2.5 thousand lene hain',
+                        'Create a customer called Ramesh.',
+                        'Add a thousand to his account.',
+                        'I need to collect another 500 from Ramesh.',
+                        'Ramesh owes me 750.',
+                        'Create Ramesh as a customer and add 1000 to his account.',
                       ].map((phrase, i) => (
                         <button
                           key={i}
@@ -795,15 +739,15 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
                   </div>
 
                   <div>
-                    <span className="text-[10px] font-bold text-slate-400 block mb-1 uppercase tracking-wider">Payment Given &amp; Received:</span>
+                    <span className="text-[10px] font-bold text-slate-400 block mb-1 uppercase tracking-wider">Queries, Navigation &amp; Confirmation:</span>
                     <div className="flex flex-wrap gap-1">
                       {[
-                        'Ram ko 500 diye',
-                        'I gave Ram 500',
-                        'Ram ko do hazaar diye',
-                        'Ram ne mujhe 500 wapas diye',
-                        'Ram ne 500 return kar diye',
-                        'Ravi ka balance batao',
+                        'Show me how much Ramesh still owes.',
+                        "Show me Ramesh's latest transaction.",
+                        'Show me the customer tab.',
+                        'Actually make that 1500.',
+                        'Yes, save it.',
+                        'Cancel that.',
                       ].map((phrase, i) => (
                         <button
                           key={i}

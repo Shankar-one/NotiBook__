@@ -9,36 +9,52 @@ export type VoiceState =
   | 'ERROR';
 
 export type StrictVoiceIntent =
+  | 'CREATE_CUSTOMER'
+  | 'GET_CUSTOMER'
+  | 'SEARCH_CUSTOMERS'
+  | 'UPDATE_CUSTOMER'
+  | 'DELETE_CUSTOMER'
   | 'ADD_RECEIVABLE'
+  | 'ADD_PAYABLE'
   | 'ADD_PAYMENT_GIVEN'
   | 'RECORD_PAYMENT_RECEIVED'
+  | 'GET_BALANCE'
   | 'GET_LEDGER'
   | 'GET_TOTAL_RECEIVABLE'
   | 'GET_TOTAL_PAYABLE'
   | 'GET_TRANSACTIONS'
-  | 'CREATE_CUSTOMER'
+  | 'GET_LAST_TRANSACTION'
   | 'UPDATE_TRANSACTION'
   | 'DELETE_TRANSACTION'
-  | 'CANCEL_LAST_ACTION'
   | 'NAVIGATE'
+  | 'CONFIRM'
+  | 'CANCEL'
+  | 'CANCEL_LAST_ACTION'
+  | 'MODIFY_PENDING'
   | 'END_CONVERSATION'
   | 'UNKNOWN';
 
 export interface StructuredVoiceInterpretation {
   intent: StrictVoiceIntent;
   secondary_intent?: StrictVoiceIntent | null;
+  customer_name: string | null;
   person_name: string | null;
+  customer_id?: string | null;
   amount: number | null;
   currency: string;
+  transaction_type?: 'receivable' | 'payable' | 'payment_received' | 'payment_given' | 'credit' | 'debit' | null;
   description: string | null;
   date: string | null;
+  time?: string | null;
+  transaction_id?: string | null;
+  page?: string | null;
   confidence: number;
   requires_confirmation: boolean;
   is_addition_to_existing?: boolean;
   existing_balance?: number | null;
   new_balance_preview?: number | null;
   clarification_question?: string | null;
-  detected_language?: 'hindi' | 'hinglish' | 'english';
+  detected_language?: 'english' | 'hindi' | 'hinglish';
   navigation_target?: string | null;
 }
 
@@ -53,9 +69,12 @@ export interface PendingConfirmation {
   intent: StrictVoiceIntent;
   secondaryIntent?: StrictVoiceIntent | null;
   personName: string;
+  customer_name?: string;
   customerId?: string;
+  customer_id?: string;
   amount: number | null;
   currency: string;
+  transactionType?: 'receivable' | 'payable' | 'payment_received' | 'payment_given' | 'credit' | 'debit';
   description?: string | null;
   paymentMode?: 'Cash' | 'UPI' | 'Bank' | 'Credit';
   isAdditionToExisting?: boolean;
@@ -65,7 +84,7 @@ export interface PendingConfirmation {
   payload: any;
   message: string;
   summaryTitle: string;
-  lang: 'hindi' | 'hinglish' | 'english';
+  lang: 'english' | 'hindi' | 'hinglish';
 }
 
 export interface PendingSlotFilling {
@@ -79,7 +98,7 @@ export interface ConversationTurn {
   role: 'user' | 'assistant' | 'system';
   text: string;
   timestamp: number;
-  lang?: 'hindi' | 'hinglish' | 'english';
+  lang?: 'english' | 'hindi' | 'hinglish';
 }
 
 export interface ConversationContext {
@@ -93,7 +112,7 @@ export interface ConversationContext {
     id: string;
     amount?: number;
     description?: string;
-    type?: 'credit' | 'debit';
+    type?: 'credit' | 'debit' | 'in' | 'out';
   };
   lastEntity?: {
     type: 'customer' | 'transaction' | 'invoice' | 'product';
@@ -107,12 +126,13 @@ export interface ConversationContext {
   pendingSlotFilling?: PendingSlotFilling;
   pendingClarification?: {
     personName?: string | null;
+    customerId?: string | null;
     amount?: number | null;
     intent?: StrictVoiceIntent | null;
   };
   pendingField?: string | null;
   currentPage?: string;
-  detectedLanguage?: 'hindi' | 'hinglish' | 'english';
+  detectedLanguage?: 'english' | 'hindi' | 'hinglish';
   lastIntent?: string;
   lastEntities?: VoiceEntities;
   recentTurns: ConversationTurn[];
@@ -120,10 +140,11 @@ export interface ConversationContext {
 
 export interface VoiceEntities {
   customer?: string;
+  customer_name?: string;
   customer_id?: string;
   amount?: number;
   currency?: string;
-  transaction_type?: 'credit' | 'debit';
+  transaction_type?: 'credit' | 'debit' | 'receivable' | 'payable';
   transaction_id?: string;
   date?: string;
   time?: string;
@@ -136,22 +157,25 @@ export interface VoiceEntities {
 }
 
 export type PlannedActionType =
-  | 'NAVIGATE'
   | 'CREATE_CUSTOMER'
+  | 'GET_CUSTOMER'
+  | 'SEARCH_CUSTOMERS'
   | 'UPDATE_CUSTOMER'
   | 'DELETE_CUSTOMER'
-  | 'GET_CUSTOMER'
-  | 'GET_CUSTOMER_BALANCE'
-  | 'GET_CUSTOMER_HISTORY'
-  | 'ADD_CUSTOMER_DEBT'
   | 'ADD_RECEIVABLE'
+  | 'ADD_PAYABLE'
+  | 'ADD_CUSTOMER_DEBT'
   | 'ADD_PAYMENT_GIVEN'
   | 'RECORD_PAYMENT'
   | 'RECORD_PAYMENT_RECEIVED'
+  | 'GET_BALANCE'
+  | 'GET_CUSTOMER_BALANCE'
   | 'GET_LEDGER'
   | 'GET_TOTAL_RECEIVABLE'
   | 'GET_TOTAL_PAYABLE'
   | 'GET_TRANSACTIONS'
+  | 'GET_LAST_TRANSACTION'
+  | 'GET_CUSTOMER_HISTORY'
   | 'GET_ACCOUNT_SUMMARY'
   | 'CREATE_SALE'
   | 'MANAGE_STOCK'
@@ -159,7 +183,11 @@ export type PlannedActionType =
   | 'GET_REMINDERS'
   | 'UPDATE_TRANSACTION'
   | 'DELETE_TRANSACTION'
+  | 'NAVIGATE'
+  | 'CONFIRM'
+  | 'CANCEL'
   | 'CANCEL_LAST_ACTION'
+  | 'MODIFY_PENDING'
   | 'END_CONVERSATION'
   | 'ASK_CLARIFICATION';
 
@@ -170,26 +198,34 @@ export interface PlannedAction {
 }
 
 export interface SemanticActionPlan {
-  detectedLanguage: 'hindi' | 'hinglish' | 'english';
+  detectedLanguage: 'english' | 'hindi' | 'hinglish';
   primaryIntent: StrictVoiceIntent | string;
   userGoalSummary: string;
   structuredInterpretation?: StructuredVoiceInterpretation;
   requiresConfirmation?: boolean;
+  naturalResponseSuggestion?: string | null;
   entities: {
     customerName?: string | null;
+    customerId?: string | null;
     amount?: number | null;
+    transactionType?: string | null;
     paymentMethod?: string | null;
     navigationTarget?: string | null;
+    page?: string | null;
     productName?: string | null;
     quantity?: number | null;
     dueDate?: string | null;
+    time?: string | null;
+    transactionId?: string | null;
     note?: string | null;
+    description?: string | null;
     [key: string]: any;
   };
   references: {
     isPronounOrReference: boolean;
-    refersTo: 'active_customer' | 'new_customer' | 'account' | 'none';
+    refersTo: 'active_customer' | 'new_customer' | 'account' | 'pending_confirmation' | 'none';
     resolvedCustomerName?: string | null;
+    resolvedCustomerId?: string | null;
   };
   missingInformation: string[];
   ambiguities: string[];
@@ -225,29 +261,7 @@ export interface VoiceServerResponse {
   updatedContext?: Partial<ConversationContext>;
 }
 
-export type VoiceIntentType =
-  | 'ADD_TRANSACTION'
-  | 'UPDATE_TRANSACTION'
-  | 'DELETE_TRANSACTION'
-  | 'GET_TRANSACTION'
-  | 'SEARCH_TRANSACTIONS'
-  | 'GET_BALANCE'
-  | 'ADD_CUSTOMER'
-  | 'UPDATE_CUSTOMER'
-  | 'DELETE_CUSTOMER'
-  | 'GET_CUSTOMER'
-  | 'SEARCH_CUSTOMERS'
-  | 'ADD_REMINDER'
-  | 'GET_REMINDERS'
-  | 'UPDATE_REMINDER'
-  | 'DELETE_REMINDER'
-  | 'GET_REPORT'
-  | 'GET_SUMMARY'
-  | 'NAVIGATE'
-  | 'HELP'
-  | 'CANCEL'
-  | 'CONFIRM'
-  | 'UNKNOWN';
+export type VoiceIntentType = StrictVoiceIntent;
 
 export interface WakeWordProvider {
   name: string;

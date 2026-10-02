@@ -6,7 +6,7 @@ export class ContextManager {
   private context: ConversationContext = {
     recentTurns: [],
     currentPage: 'home',
-    detectedLanguage: 'hinglish',
+    detectedLanguage: 'english',
   };
 
   public getContext(): ConversationContext {
@@ -67,7 +67,7 @@ export class ContextManager {
   }
 
   public getDetectedLanguage(): 'hindi' | 'hinglish' | 'english' {
-    return this.context.detectedLanguage || 'hinglish';
+    return this.context.detectedLanguage || 'english';
   }
 
   public setActiveTransaction(tx: { id: string; amount?: number; description?: string; type?: 'credit' | 'debit' } | null): void {
@@ -127,7 +127,9 @@ export class ContextManager {
     if (partial.currentPage !== undefined) this.context.currentPage = partial.currentPage;
     if (partial.detectedLanguage !== undefined) this.context.detectedLanguage = partial.detectedLanguage;
     if (partial.pendingField !== undefined) this.context.pendingField = partial.pendingField;
-    if (partial.pendingConfirmation !== undefined) this.context.pendingConfirmation = partial.pendingConfirmation;
+    if ('pendingConfirmation' in partial) {
+      this.context.pendingConfirmation = partial.pendingConfirmation || undefined;
+    }
     if (partial.pendingSlotFilling !== undefined) this.context.pendingSlotFilling = partial.pendingSlotFilling;
   }
 

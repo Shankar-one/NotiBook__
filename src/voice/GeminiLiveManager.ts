@@ -217,6 +217,10 @@ export class GeminiLiveManager {
 
         // Check if human confirmation is required before database mutation
         if (data.requiresConfirmation && data.pendingConfirmation) {
+          if (data.updatedCustomer) {
+            this.contextManager.setActiveCustomer(data.updatedCustomer);
+            this.actionRouter.notifyCustomerUpdated(data.updatedCustomer);
+          }
           this.contextManager.setPendingConfirmation(data.pendingConfirmation);
           if (data.updatedContext) {
             this.contextManager.updateFromContext(data.updatedContext);

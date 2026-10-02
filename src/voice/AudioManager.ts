@@ -367,7 +367,7 @@ export class AudioManager {
    */
   public async speakText(
     text: string,
-    lang?: 'hindi' | 'hinglish' | 'english' | string,
+    _lang?: 'hindi' | 'hinglish' | 'english' | string,
     onEnd?: () => void
   ): Promise<void> {
     this.interruptPlayback();
@@ -378,20 +378,9 @@ export class AudioManager {
       return;
     }
 
-    // Automatically detect whether this utterance is Hindi or English
-    const autoDetected = detectLanguage(rawText);
-    const isDevanagari = /[\u0900-\u097F]/.test(rawText);
-    const isHindi =
-      isDevanagari ||
-      autoDetected === 'hindi' ||
-      autoDetected === 'hinglish' ||
-      (lang === 'hindi' && autoDetected !== 'english');
+    const spokenText = prepareEnglishForTTS(rawText);
 
-    const spokenText = isHindi
-      ? toDevanagariForHindiTTS(rawText)
-      : prepareEnglishForTTS(rawText);
-
-    // 1. Primary: Server-side neural voice (/api/voice/tts) for guaranteed native Hindi (hi-IN) & English (en-US) voice
+    // 1. Primary: Server-side neural English voice (/api/voice/tts)
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 3500);
@@ -400,7 +389,7 @@ export class AudioManager {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: spokenText,
-          lang: isHindi ? 'hindi' : 'english',
+          lang: 'english',
         }),
         signal: controller.signal,
       });
@@ -417,7 +406,7 @@ export class AudioManager {
       console.warn('[AudioManager] Server TTS unavailable, falling back to browser synthesis:', err);
     }
 
-    // 2. Fallback: Browser SpeechSynthesis with strict Hindi (hi-IN + Devanagari) vs English (en-US) voice matching
+    // 2. Fallback: Browser SpeechSynthesis with natural English voice
     const voices = await this.waitForVoices();
     return new Promise((resolve) => {
       if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
@@ -428,37 +417,17 @@ export class AudioManager {
 
       window.speechSynthesis.cancel();
 
-      let chosenVoice: SpeechSynthesisVoice | undefined;
-      let targetLang = isHindi ? 'hi-IN' : 'en-US';
-
-      if (isHindi) {
-        // Strictly prefer native Hindi (hi-IN) voices — NEVER pick an English (en-IN / en-US) voice for Hindi!
-        chosenVoice =
-          voices.find((v) => v.lang.toLowerCase() === 'hi-in' && v.name.toLowerCase().includes('google')) ||
-          voices.find((v) => v.lang.toLowerCase().startsWith('hi')) ||
-          voices.find(
-            (v) =>
-              v.name.toLowerCase().includes('hindi') ||
-              v.name.includes('हिन्दी') ||
-              v.name.toLowerCase().includes('swara') ||
-              v.name.toLowerCase().includes('madhur') ||
-              v.name.toLowerCase().includes('hemant') ||
-              v.name.toLowerCase().includes('kalpana') ||
-              v.name.toLowerCase().includes('lekha')
-          );
-      } else {
-        // Strictly prefer natural English voices for English speech
-        chosenVoice =
-          voices.find(
-            (v) =>
-              (v.lang === 'en-US' || v.lang === 'en-GB' || v.lang === 'en-IN') &&
-              (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Samantha') || v.name.includes('Aria') || v.name.includes('Jenny'))
-          ) ||
-          voices.find((v) => v.lang === 'en-US' || v.lang === 'en-GB') ||
-          voices.find((v) => v.lang.toLowerCase().startsWith('en'));
-        if (chosenVoice?.lang) {
-          targetLang = chosenVoice.lang;
-        }
+      let targetLang = 'en-US';
+      const chosenVoice =
+        voices.find(
+          (v) =>
+            (v.lang === 'en-US' || v.lang === 'en-GB' || v.lang === 'en-IN') &&
+            (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Samantha') || v.name.includes('Aria') || v.name.includes('Jenny'))
+        ) ||
+        voices.find((v) => v.lang === 'en-US' || v.lang === 'en-GB') ||
+        voices.find((v) => v.lang.toLowerCase().startsWith('en'));
+      if (chosenVoice?.lang) {
+        targetLang = chosenVoice.lang;
       }
 
       const utterance = new SpeechSynthesisUtterance(spokenText);

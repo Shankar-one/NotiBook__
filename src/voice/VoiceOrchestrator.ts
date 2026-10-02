@@ -39,13 +39,13 @@ export class VoiceOrchestrator {
   private isRecognizing: boolean = false;
   private speechCommitTimer: any = null;
   private latestHeardText: string = '';
-  private currentLanguagePreference: PreferredLanguage = 'auto';
-  private currentVoiceLanguage: UserLanguage = 'hinglish';
+  private currentLanguagePreference: PreferredLanguage = 'english';
+  private currentVoiceLanguage: UserLanguage = 'english';
 
   constructor(actionCallbacks: ActionRouterCallbacks = {}, events: VoiceOrchestratorEvents = {}) {
     this.events = events;
-    this.currentLanguagePreference = getStoredLanguagePreference();
-    this.currentVoiceLanguage = this.currentLanguagePreference === 'english' ? 'english' : 'hindi';
+    this.currentLanguagePreference = 'english';
+    this.currentVoiceLanguage = 'english';
 
     this.audioManager = new AudioManager();
     this.contextManager = new ContextManager();
@@ -172,23 +172,14 @@ export class VoiceOrchestrator {
     return this.currentVoiceLanguage;
   }
 
-  public setLanguagePreference(pref: PreferredLanguage) {
-    this.currentLanguagePreference = pref;
-    setStoredLanguagePreference(pref);
-    if (pref === 'english') {
-      this.currentVoiceLanguage = 'english';
-    } else if (pref === 'hindi' || pref === 'hinglish') {
-      this.currentVoiceLanguage = 'hindi';
-    }
-    // Update recognition language: en-IN recognizes both English and spoken Hindi words accurately
+  public setLanguagePreference(_pref: PreferredLanguage) {
+    this.currentLanguagePreference = 'english';
+    this.currentVoiceLanguage = 'english';
+    setStoredLanguagePreference('english');
     if (this.recognition) {
-      if (pref === 'hindi') {
-        this.recognition.lang = 'hi-IN';
-      } else {
-        this.recognition.lang = 'en-IN';
-      }
+      this.recognition.lang = 'en-US';
     }
-    this.events.onLanguageChange?.(this.currentVoiceLanguage, pref);
+    this.events.onLanguageChange?.('english', 'english');
   }
 
   public setCallbacks(actionCallbacks: ActionRouterCallbacks, events: VoiceOrchestratorEvents) {
@@ -209,7 +200,7 @@ export class VoiceOrchestrator {
       this.recognition = new SpeechRecognition();
       this.recognition.continuous = true;
       this.recognition.interimResults = true;
-      this.recognition.lang = this.currentLanguagePreference === 'hindi' ? 'hi-IN' : 'en-IN';
+      this.recognition.lang = 'en-US';
 
       this.recognition.onstart = () => {
         this.isContinuousListening = true;
@@ -247,13 +238,6 @@ export class VoiceOrchestrator {
           this.latestHeardText = combined;
           this.events.onInterimTranscript?.(combined);
 
-          // Real-time automatic language detection while user is speaking
-          const liveDetected = detectLanguage(combined, this.currentLanguagePreference);
-          if (liveDetected !== this.currentVoiceLanguage) {
-            this.currentVoiceLanguage = liveDetected;
-            this.events.onLanguageChange?.(liveDetected, this.currentLanguagePreference);
-          }
-
           // Reset silence timer: wait for 2.2 seconds of complete silence after speech ends
           // This allows users to speak compound sentences with natural pauses without being cut off
           if (this.speechCommitTimer) clearTimeout(this.speechCommitTimer);
@@ -268,13 +252,9 @@ export class VoiceOrchestrator {
         if (e.error === 'not-allowed') {
           console.warn('[VoiceOrchestrator] Microphone permission not allowed');
           this.setState('ERROR');
-          const errorMsg = this.currentVoiceLanguage === 'hindi'
-            ? 'माइक्रोफ़ोन अनुमति अनिवार्य है। कृपया ब्राउज़र में माइक्रोफ़ोन की अनुमति दें।'
-            : (this.currentVoiceLanguage === 'english'
-                ? 'Microphone access is compulsory. Please allow microphone access in your browser.'
-                : 'Microphone permission compulsory hai. Kripya browser mein microphone allow karein.');
-          this.events.onJarvisSpokenText?.(errorMsg, this.currentVoiceLanguage);
-          this.events.onTranscript?.('assistant', errorMsg, this.currentVoiceLanguage);
+          const errorMsg = 'Microphone access is compulsory. Please allow microphone access in your browser.';
+          this.events.onJarvisSpokenText?.(errorMsg, 'english');
+          this.events.onTranscript?.('assistant', errorMsg, 'english');
           return;
         }
 
@@ -345,13 +325,11 @@ export class VoiceOrchestrator {
     const recorded = await this.audioManager.getRecordedAudioBase64();
     if (recorded && recorded.base64) {
       this.setState('THINKING');
-      this.events.onInterimTranscript?.(
-        this.currentVoiceLanguage === 'hindi' ? 'पूरा ऑडियो बदला जा रहा है...' : 'Converting whole audio to text...'
-      );
+      this.events.onInterimTranscript?.('Converting audio to text...');
       const transcript = await this.audioManager.transcribeAudio(
         recorded.base64,
         recorded.mimeType,
-        this.currentVoiceLanguage
+        'english'
       );
       this.events.onInterimTranscript?.('');
       this.audioManager.resetRecordedAudio();
@@ -366,7 +344,6 @@ export class VoiceOrchestrator {
 
   /**
    * Called when "Hey Jarvis" wake word is spoken
-   * Requirement: "Main sun raha hu should be hindi accent"
    */
   private async handleWakeWordTriggered(rawTranscript?: string) {
     console.log('[VoiceOrchestrator] Wake word "Hey Jarvis" activated! Opening recording feature immediately. Transcript:', rawTranscript);
@@ -375,11 +352,10 @@ export class VoiceOrchestrator {
     // Play immediate affirmative acoustic chime so user knows recording has started
     this.audioManager.playWakeChime();
 
-    // Check if user spoke a command alongside "Hey Jarvis" (e.g. "Hey Jarvis, customer tab kholo" or "Hey Jarvis add 1000 into account")
     let trailingCommand = '';
     if (rawTranscript) {
       trailingCommand = rawTranscript.replace(
-        /\b(hey|hay|hi|hello|ok|okay|oye|ae|a|sun|suno|he|ha|haay)?\s*(jarvis|jervis|jarves|javis|jarvish|service|travis|charvis|jahvis|jarvisis|jarvises|jar\s*vis|job\s*is|tarvis|jawis)\b|जार्विस|हे\s*जार्विस|हाय\s*जार्विस|सुनो\s*जार्विस|जारविस|ए\s*जार्विस|सर्विस/gi,
+        /\b(hey|hay|hi|hello|ok|okay)?\s*(jarvis|jervis|jarves|javis|jarvish|service|travis|charvis|jahvis|jarvisis|jarvises|jar\s*vis|job\s*is|tarvis|jawis)\b/gi,
         ''
       ).replace(/^[,:.\s]+|[,:.\s]+$/g, '').trim();
     }
@@ -394,12 +370,10 @@ export class VoiceOrchestrator {
     }
 
     // User only said "Hey Jarvis":
-    const isEnglishWake = this.currentVoiceLanguage === 'english' && (!rawTranscript || !/[\u0900-\u097F]/.test(rawTranscript));
-    const greetingLang: UserLanguage = isEnglishWake ? 'english' : 'hindi';
-    const greetingText = isEnglishWake ? 'Yes, I am listening.' : 'हाँ, मैं सुन रहा हूँ।';
-    this.events.onJarvisSpokenText?.(greetingText, greetingLang);
-    this.events.onTranscript?.('assistant', greetingText, greetingLang);
-    void this.audioManager.speakText(greetingText, greetingLang);
+    const greetingText = 'Yes, I am listening.';
+    this.events.onJarvisSpokenText?.(greetingText, 'english');
+    this.events.onTranscript?.('assistant', greetingText, 'english');
+    void this.audioManager.speakText(greetingText, 'english');
   }
 
   /**
@@ -441,13 +415,9 @@ export class VoiceOrchestrator {
     } catch (err: any) {
       console.warn('[VoiceOrchestrator] Microphone capture failed:', err);
       this.setState('ERROR');
-      const errorMsg = this.currentVoiceLanguage === 'hindi'
-        ? 'माइक्रोफ़ोन अनुमति अनिवार्य है। कृपया अनुमति दें।'
-        : (this.currentVoiceLanguage === 'english'
-            ? 'Microphone access is compulsory. Please allow microphone access to talk to Jarvis.'
-            : 'Microphone permission compulsory hai. Jarvis se baat karne ke liye mic allow karein.');
-      this.events.onJarvisSpokenText?.(errorMsg, this.currentVoiceLanguage);
-      this.events.onTranscript?.('assistant', errorMsg, this.currentVoiceLanguage);
+      const errorMsg = 'Microphone access is compulsory. Please allow microphone access to talk to Jarvis.';
+      this.events.onJarvisSpokenText?.(errorMsg, 'english');
+      this.events.onTranscript?.('assistant', errorMsg, 'english');
       return;
     }
 
@@ -455,7 +425,7 @@ export class VoiceOrchestrator {
     this.isContinuousListening = true;
     if (this.recognition && !this.isRecognizing) {
       try {
-        this.recognition.lang = this.currentLanguagePreference === 'hindi' ? 'hi-IN' : 'en-IN';
+        this.recognition.lang = 'en-US';
         this.recognition.start();
       } catch (e) {
         console.warn('[VoiceOrchestrator] recognition start warning:', e);
@@ -537,9 +507,7 @@ export class VoiceOrchestrator {
    */
   public async toggleSession(): Promise<void> {
     if (this.currentState === 'IDLE' || this.currentState === 'ERROR') {
-      const isEng = this.currentVoiceLanguage === 'english';
-      const greeting = isEng ? 'Yes, I am listening.' : 'हाँ, मैं सुन रहा हूँ।';
-      await this.startActiveSession(greeting, isEng ? 'english' : 'hindi');
+      await this.startActiveSession('Yes, I am listening.', 'english');
     } else {
       await this.stopActiveSession();
     }
@@ -562,22 +530,15 @@ export class VoiceOrchestrator {
     let text = rawText.trim();
 
     // Strip leading "Hey Jarvis" / "Jarvis" if spoken inside the utterance
-    text = text.replace(/^(hey\s+jarvis|hi\s+jarvis|hello\s+jarvis|ok\s+jarvis|jarvis|हे\s*जार्विस|जार्विस)\s*[,:]?\s*/i, '').trim();
+    text = text.replace(/^(hey\s+jarvis|hi\s+jarvis|hello\s+jarvis|ok\s+jarvis|jarvis)\s*[,:]?\s*/i, '').trim();
     if (!text) {
-      // Just said "Hey Jarvis" during listening
-      const isEng = this.currentVoiceLanguage === 'english';
-      const ack = isEng ? 'Yes, I am listening.' : 'हाँ, मैं सुन रहा हूँ।';
-      const ackLang: UserLanguage = isEng ? 'english' : 'hindi';
-      this.events.onTranscript?.('assistant', ack, ackLang);
-      await this.speakAssistantResponse(ack, ackLang);
+      const ack = 'Yes, I am listening.';
+      this.events.onTranscript?.('assistant', ack, 'english');
+      await this.speakAssistantResponse(ack, 'english');
       return;
     }
 
-    // Detect user language dynamically from speech
-    const detectedLang = detectLanguage(text, this.currentLanguagePreference);
-    this.currentVoiceLanguage = detectedLang;
-    this.events.onLanguageChange?.(detectedLang, this.currentLanguagePreference);
-
+    this.currentVoiceLanguage = 'english';
     const lower = text.toLowerCase();
 
     // Check for exit keywords
@@ -587,20 +548,11 @@ export class VoiceOrchestrator {
       lower === 'exit' ||
       lower === 'close' ||
       lower === 'bye' ||
-      lower.includes('alvida') ||
-      lower.includes('band karo') ||
-      text.includes('बंद करो') ||
-      text.includes('अलविदा')
+      lower === 'goodbye'
     ) {
-      let byeMsg = 'Goodbye! Have a great day.';
-      if (detectedLang === 'hindi') {
-        byeMsg = 'अलविदा! आपका दिन शुभ हो।';
-      } else if (detectedLang === 'hinglish') {
-        byeMsg = 'Alvida! Have a great day.';
-      }
-
-      this.events.onTranscript?.('assistant', byeMsg, detectedLang);
-      await this.speakAssistantResponse(byeMsg, detectedLang);
+      const byeMsg = 'Goodbye! Have a great day.';
+      this.events.onTranscript?.('assistant', byeMsg, 'english');
+      await this.speakAssistantResponse(byeMsg, 'english');
       await this.stopActiveSession();
       return;
     }
