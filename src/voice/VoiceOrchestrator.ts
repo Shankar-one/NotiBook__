@@ -3,7 +3,7 @@ import { GeminiLiveManager } from './GeminiLiveManager';
 import { WakeWordManager } from './WakeWordManager';
 import { ContextManager } from './ContextManager';
 import { ActionRouter, ActionRouterCallbacks } from './ActionRouter';
-import { VoiceState } from './types';
+import { VoiceState, PendingConfirmation } from './types';
 import { 
   detectLanguage, 
   UserLanguage, 
@@ -20,6 +20,7 @@ export interface VoiceOrchestratorEvents {
   onVolumeChange?: (volume: number) => void;
   onJarvisSpokenText?: (text: string, lang?: UserLanguage) => void;
   onLanguageChange?: (lang: UserLanguage, pref: PreferredLanguage) => void;
+  onPendingConfirmationChange?: (pending: PendingConfirmation | null) => void;
 }
 
 export class VoiceOrchestrator {
@@ -52,6 +53,12 @@ export class VoiceOrchestrator {
 
     this.geminiLive = new GeminiLiveManager(this.contextManager, this.actionRouter, {
       onStateChange: (state) => this.setState(state),
+      onPendingConfirmationChange: (pending) => {
+        this.events.onPendingConfirmationChange?.(pending);
+        if (pending) {
+          this.setState('WAITING_FOR_CONFIRMATION');
+        }
+      },
       onTranscript: (role, text, lang) => {
         const detectedLang = lang || this.currentVoiceLanguage;
         this.currentVoiceLanguage = detectedLang;
@@ -139,6 +146,22 @@ export class VoiceOrchestrator {
 
   public getContextManager(): ContextManager {
     return this.contextManager;
+  }
+
+  public getPendingConfirmation(): PendingConfirmation | undefined {
+    return this.contextManager.getPendingConfirmation();
+  }
+
+  public async confirmPendingAction(
+    editedFields?: Partial<PendingConfirmation>
+  ): Promise<{ success: boolean; reply: string }> {
+    this.audioManager.interruptPlayback();
+    return await this.geminiLive.confirmPendingAction(editedFields);
+  }
+
+  public async cancelPendingAction(): Promise<string> {
+    this.audioManager.interruptPlayback();
+    return await this.geminiLive.cancelPendingAction();
   }
 
   public getLanguagePreference(): PreferredLanguage {
@@ -591,7 +614,8 @@ export class VoiceOrchestrator {
    * Matches spoken audio language to generated response text language
    */
   private async speakAssistantResponse(text: string, lang?: string): Promise<void> {
-    this.setState('SPEAKING');
+    const hasPendingConfirm = Boolean(this.contextManager.getPendingConfirmation());
+    this.setState(hasPendingConfirm ? 'WAITING_FOR_CONFIRMATION' : 'SPEAKING');
     const spokenLang = (lang as UserLanguage) || this.currentVoiceLanguage;
     this.events.onJarvisSpokenText?.(text, spokenLang);
 
@@ -599,7 +623,9 @@ export class VoiceOrchestrator {
     const safetyTimer = setTimeout(() => {
       if (!finished) {
         finished = true;
-        if (this.isContinuousListening && this.currentState !== 'IDLE' && this.currentState !== 'ENDING') {
+        if (this.contextManager.getPendingConfirmation()) {
+          this.setState('WAITING_FOR_CONFIRMATION');
+        } else if (this.isContinuousListening && this.currentState !== 'IDLE' && this.currentState !== 'ENDING') {
           this.setState('LISTENING');
         }
       }
@@ -609,9 +635,12 @@ export class VoiceOrchestrator {
       if (!finished) {
         finished = true;
         clearTimeout(safetyTimer);
-        // Seamlessly resume listening after Jarvis finishes speaking
-        if (this.isContinuousListening && this.currentState !== 'IDLE' && this.currentState !== 'ENDING') {
+        if (this.contextManager.getPendingConfirmation()) {
+          this.setState('WAITING_FOR_CONFIRMATION');
+        } else if (this.isContinuousListening && this.currentState !== 'IDLE' && this.currentState !== 'ENDING') {
           this.setState('LISTENING');
+        } else if (!this.isContinuousListening && this.currentState === 'SPEAKING') {
+          this.setState('IDLE');
         }
       }
     });

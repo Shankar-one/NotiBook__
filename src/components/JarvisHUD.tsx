@@ -1,30 +1,28 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Mic, 
-  MicOff, 
   Volume2, 
-  Sparkles, 
-  X, 
   ChevronUp, 
   ChevronDown, 
   AlertCircle,
-  CornerDownRight,
   Square,
-  CheckCircle,
-  HelpCircle,
+  CheckCircle2,
   SlidersHorizontal,
   ArrowRight,
-  Globe
+  Globe,
+  Loader2,
+  Pencil,
+  XCircle
 } from 'lucide-react';
 import { voiceSession } from '../voice';
-import { VoiceState, ConversationTurn } from '../voice/types';
+import { VoiceState, ConversationTurn, PendingConfirmation, StrictVoiceIntent } from '../voice/types';
 import { UserLanguage, PreferredLanguage } from '../voice/LanguageUtils';
 
 interface JarvisHUDProps {
   onNavigateToTab?: (tab: 'home' | 'customers' | 'book', subtab?: 'billing' | 'transactions' | 'stocks') => void;
 }
 
-export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
+export const JarvisHUD: React.FC<JarvisHUDProps> = () => {
   const [voiceState, setVoiceState] = useState<VoiceState>('IDLE');
   const [volume, setVolume] = useState<number>(0);
   const [lastMessage, setLastMessage] = useState<string>('');
@@ -37,6 +35,16 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
   const [expanded, setExpanded] = useState<boolean>(false);
   const [showDevTestMode, setShowDevTestMode] = useState<boolean>(false);
 
+  // Confirmation & Edit / Saving / Success states
+  const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
+  const [isEditingConfirmation, setIsEditingConfirmation] = useState<boolean>(false);
+  const [editPersonName, setEditPersonName] = useState<string>('');
+  const [editAmount, setEditAmount] = useState<string>('');
+  const [editIntent, setEditIntent] = useState<StrictVoiceIntent>('ADD_RECEIVABLE');
+  const [editDescription, setEditDescription] = useState<string>('');
+  const [isSavingConfirmation, setIsSavingConfirmation] = useState<boolean>(false);
+  const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
+
   useEffect(() => {
     setCurrentLang(voiceSession.getCurrentVoiceLanguage());
     setLangPref(voiceSession.getLanguagePreference());
@@ -48,8 +56,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
         setIsWakeWordActive(voiceSession.isWakeWordListening());
         if (state !== 'IDLE') {
           setExpanded(true);
-        } else {
-          setExpanded(false);
+        } else if (!voiceSession.getPendingConfirmation()) {
           setInterimTranscript('');
         }
       },
@@ -60,6 +67,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
         if (turn.role === 'user') {
           setLastUserUtterance(turn.text);
           setInterimTranscript('');
+          setSaveSuccessMessage(null);
         } else if (turn.role === 'assistant') {
           setLastMessage(turn.text);
         }
@@ -77,6 +85,22 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
       onLanguageChange: (lang, pref) => {
         setCurrentLang(lang);
         setLangPref(pref);
+      },
+      onPendingConfirmationChange: (pending) => {
+        setPendingConfirmation(pending);
+        if (pending) {
+          setExpanded(true);
+          setIsEditingConfirmation(false);
+          setIsSavingConfirmation(false);
+          setSaveSuccessMessage(null);
+          setEditPersonName(pending.personName || '');
+          setEditAmount(pending.amount !== null && pending.amount !== undefined ? String(pending.amount) : '');
+          setEditIntent(pending.intent);
+          setEditDescription(pending.description || '');
+        } else {
+          setIsEditingConfirmation(false);
+          setIsSavingConfirmation(false);
+        }
       },
     });
 
@@ -108,16 +132,83 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
 
   const handleStop = async () => {
     await voiceSession.stop();
-    setExpanded(false);
+    if (!pendingConfirmation) {
+      setExpanded(false);
+    }
   };
 
   const handleSimulateUtterance = async (text: string) => {
+    setSaveSuccessMessage(null);
     await voiceSession.sendManualUtterance(text);
   };
 
   const handleSetLanguage = (pref: PreferredLanguage) => {
     voiceSession.setLanguage(pref);
     setLangPref(pref);
+  };
+
+  const handleConfirmAndSave = async () => {
+    if (!pendingConfirmation || isSavingConfirmation) return;
+    setIsSavingConfirmation(true);
+    try {
+      const parsedAmt = editAmount.trim() !== '' ? Number(editAmount) : pendingConfirmation.amount;
+      const result = await voiceSession.confirmPendingAction({
+        personName: editPersonName.trim() || pendingConfirmation.personName,
+        amount: parsedAmt !== null && !isNaN(Number(parsedAmt)) ? Number(parsedAmt) : pendingConfirmation.amount,
+        intent: editIntent,
+        description: editDescription.trim() || pendingConfirmation.description,
+      });
+      if (result.success) {
+        setSaveSuccessMessage(result.reply);
+        setTimeout(() => {
+          setSaveSuccessMessage((prev) => (prev === result.reply ? null : prev));
+        }, 4500);
+      }
+    } finally {
+      setIsSavingConfirmation(false);
+      setIsEditingConfirmation(false);
+    }
+  };
+
+  const handleCancelConfirmation = async () => {
+    if (isSavingConfirmation) return;
+    setIsEditingConfirmation(false);
+    await voiceSession.cancelPendingAction();
+  };
+
+  const getIntentBadgeInfo = (intent: StrictVoiceIntent) => {
+    switch (intent) {
+      case 'ADD_RECEIVABLE':
+        return {
+          label: currentLang === 'english' ? 'ADD RECEIVABLE (Udhar / Collect)' : 'लेनदारी / उधार (ADD RECEIVABLE)',
+          color: 'bg-amber-500/20 text-amber-300 border-amber-500/50',
+          sign: '+',
+        };
+      case 'ADD_PAYMENT_GIVEN':
+        return {
+          label: currentLang === 'english' ? 'PAYMENT GIVEN (You Gave)' : 'भुगतान दिया (PAYMENT GIVEN)',
+          color: 'bg-orange-500/20 text-orange-300 border-orange-500/50',
+          sign: '+',
+        };
+      case 'RECORD_PAYMENT_RECEIVED':
+        return {
+          label: currentLang === 'english' ? 'PAYMENT RECEIVED (Customer Paid)' : 'भुगतान मिला (PAYMENT RECEIVED)',
+          color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50',
+          sign: '-',
+        };
+      case 'CREATE_CUSTOMER':
+        return {
+          label: currentLang === 'english' ? 'CREATE NEW CUSTOMER' : 'नया ग्राहक जोड़ें (CREATE CUSTOMER)',
+          color: 'bg-sky-500/20 text-sky-300 border-sky-500/50',
+          sign: '',
+        };
+      default:
+        return {
+          label: intent.replace(/_/g, ' '),
+          color: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/50',
+          sign: '',
+        };
+    }
   };
 
   // Status visual colors
@@ -127,48 +218,46 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
     LISTENING: 'bg-[#1C232B] text-white border-[#E85D43] shadow-2xl shadow-[#E85D43]/20',
     THINKING: 'bg-[#1C232B] text-indigo-200 border-indigo-500/60 shadow-2xl shadow-indigo-950/40',
     SPEAKING: 'bg-[#1C232B] text-white border-emerald-500/80 shadow-2xl shadow-emerald-950/30',
-    WAITING_FOR_CONFIRMATION: 'bg-[#1C232B] text-amber-200 border-amber-500 shadow-2xl shadow-amber-950/40',
+    WAITING_FOR_CONFIRMATION: 'bg-[#1C232B] text-amber-100 border-amber-400 shadow-2xl shadow-amber-950/50 ring-2 ring-amber-400/30',
     ENDING: 'bg-[#1C232B] text-slate-200 border-slate-600 shadow-2xl',
     ERROR: 'bg-[#1C232B] text-rose-200 border-rose-500 shadow-2xl',
   };
 
-  // Localized Status Titles based on voice language
   const getStatusTitle = (): string => {
+    if (pendingConfirmation || voiceState === 'WAITING_FOR_CONFIRMATION') {
+      return currentLang === 'english' ? 'Review & Confirm Entry' : 'एंट्री की पुष्टि करें (Confirm Entry)';
+    }
     if (voiceState === 'CONNECTING') {
-      return currentLang === 'hindi' ? 'जार्विस से कनेक्ट हो रहा है...' : (currentLang === 'english' ? 'Connecting to Jarvis...' : 'Connecting to Jarvis...');
+      return currentLang === 'hindi' ? 'जार्विस से कनेक्ट हो रहा है...' : 'Connecting to Jarvis...';
     }
     if (voiceState === 'LISTENING') {
-      return currentLang === 'hindi' ? 'सुन रहा हूँ... बोलिए' : (currentLang === 'english' ? 'Listening to you...' : 'Listening to you...');
+      return currentLang === 'hindi' ? 'सुन रहा हूँ... बोलिए' : 'Listening to you...';
     }
     if (voiceState === 'THINKING') {
-      return currentLang === 'hindi' ? 'जार्विस सोच रहा है...' : (currentLang === 'english' ? 'Jarvis thinking...' : 'Jarvis thinking...');
+      return currentLang === 'hindi' ? 'जार्विस समझ रहा है...' : 'Interpreting command...';
     }
     if (voiceState === 'SPEAKING') {
-      return currentLang === 'hindi' ? 'जार्विस बोल रहा है' : (currentLang === 'english' ? 'Jarvis speaking' : 'Jarvis speaking');
-    }
-    if (voiceState === 'WAITING_FOR_CONFIRMATION') {
-      return currentLang === 'hindi' ? 'पुष्टि की आवश्यकता है' : (currentLang === 'english' ? 'Confirmation needed' : 'Confirmation needed');
+      return currentLang === 'hindi' ? 'जार्विस बोल रहा है' : 'Jarvis speaking';
     }
     if (voiceState === 'ENDING') {
-      return currentLang === 'hindi' ? 'सेशन समाप्त हो रहा है...' : (currentLang === 'english' ? 'Session ending...' : 'Session ending...');
+      return currentLang === 'hindi' ? 'सेशन समाप्त हो रहा है...' : 'Session ending...';
     }
     if (voiceState === 'ERROR') {
-      return currentLang === 'hindi' ? '⚠️ माइक्रोफ़ोन अनुमति अनिवार्य' : (currentLang === 'english' ? '⚠️ Microphone Access Compulsory' : '⚠️ Microphone Access Compulsory');
+      return currentLang === 'hindi' ? '⚠️ माइक्रोफ़ोन अनुमति अनिवार्य' : '⚠️ Microphone Access Compulsory';
     }
-    // IDLE
     if (isWakeWordActive) {
       if (currentLang === 'hindi') return '🎙️ "हे जार्विस" बोलें (वेक वर्ड सक्रिय)';
-      if (currentLang === 'english') return '🎙️ Say "Hey Jarvis" (Listening)';
       return '🎙️ Say "Hey Jarvis" (Listening)';
     } else {
       if (currentLang === 'hindi') return '🎙️ "हे जार्विस" चालू करने के लिए टैप करें';
-      if (currentLang === 'english') return '🎙️ Tap to Enable "Hey Jarvis"';
       return '🎙️ Tap to Enable "Hey Jarvis"';
     }
   };
 
-  // Localized Subtitles based on voice language
   const getSublineText = (): string => {
+    if (pendingConfirmation) {
+      return `${pendingConfirmation.personName}${pendingConfirmation.amount ? ` • ₹${pendingConfirmation.amount.toLocaleString('en-IN')}` : ''}`;
+    }
     if (voiceState === 'ERROR') {
       return currentLang === 'hindi' ? 'माइक्रोफ़ोन अनुमति आवश्यक है — अनुमति देने के लिए क्लिक करें' : 'Microphone permission is required — Click to allow';
     }
@@ -177,12 +266,9 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
     }
     if (voiceState === 'LISTENING') {
       if (currentLang === 'hindi') {
-        return 'पूरा वाक्य बोलें... फिर 2 सेकंड रुकें या "पूरा हुआ" दबाएं';
+        return 'पूरा वाक्य बोलें... जैसे "राम से 500 लेने हैं"';
       }
-      if (currentLang === 'english') {
-        return 'Speak your full request... pause or tap Done';
-      }
-      return 'Speak full sentence... pause or tap Done';
+      return 'Speak naturally... e.g. "Ram se 500 lene hain"';
     }
     if (voiceState === 'SPEAKING') {
       return lastMessage;
@@ -192,18 +278,9 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
     }
     if (voiceState === 'IDLE') {
       if (currentLang === 'hindi') {
-        return 'माइक पर टैप करें या "हे जार्विस" बोलें • निरंतर वॉइस मोड';
-      }
-      if (currentLang === 'english') {
-        return 'Tap mic or say "Hey Jarvis" • Continuous multi-turn';
+        return 'माइक पर टैप करें या "हे जार्विस" बोलें • हिंदी / इंग्लिश';
       }
       return 'Tap mic or say "Hey Jarvis" • Hindi / Hinglish / English';
-    }
-    if (currentLang === 'hindi') {
-      return 'हिंदी में स्वाभाविक रूप से बोलें';
-    }
-    if (currentLang === 'english') {
-      return 'Speak naturally in English';
     }
     return 'Speak naturally in Hindi, Hinglish, or English';
   };
@@ -211,10 +288,10 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
   return (
     <aside 
       aria-label="Jarvis Voice Assistant" 
-      className="fixed bottom-5 right-5 z-40 max-w-sm sm:max-w-md w-full px-4 sm:px-0"
+      className="fixed bottom-4 right-4 z-50 max-w-md w-[calc(100vw-2rem)] sm:w-full"
     >
-      <div className={`rounded-2xl border backdrop-blur-md transition-all duration-300 overflow-hidden ${stateColor[voiceState] || stateColor.IDLE}`}>
-        {/* Main Bar */}
+      <div className={`rounded-2xl border backdrop-blur-md transition-all duration-300 overflow-hidden ${stateColor[pendingConfirmation ? 'WAITING_FOR_CONFIRMATION' : (voiceState || 'IDLE')]}`}>
+        {/* Main Header Bar */}
         <div className="flex items-center justify-between p-3.5 gap-3">
           {/* Status Icon & Label */}
           <div 
@@ -235,22 +312,21 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setExpanded(!expanded); }}
           >
             <div className="relative shrink-0">
-              <div className={`flex items-center justify-center w-8 h-8 rounded-xl transition-colors ${
+              <div className={`flex items-center justify-center w-9 h-9 rounded-xl transition-colors ${
+                pendingConfirmation || voiceState === 'WAITING_FOR_CONFIRMATION' ? 'bg-amber-500 text-slate-950 font-bold' :
                 voiceState === 'LISTENING' ? 'bg-[#E85D43] text-white animate-pulse' :
                 voiceState === 'SPEAKING' ? 'bg-emerald-500 text-white' :
                 voiceState === 'THINKING' ? 'bg-indigo-500 text-white animate-spin' :
-                voiceState === 'WAITING_FOR_CONFIRMATION' ? 'bg-amber-500 text-black font-bold' :
                 voiceState === 'CONNECTING' ? 'bg-amber-600 text-white' :
                 'bg-slate-800 text-slate-300'
               }`}>
-                {voiceState === 'SPEAKING' ? <Volume2 size={16} /> : <Mic size={16} />}
+                {voiceState === 'SPEAKING' ? <Volume2 size={18} /> : <Mic size={18} />}
               </div>
 
-              {/* Wake Word listening pulse indicator when IDLE */}
               {voiceState === 'IDLE' && isWakeWordActive && (
-                <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
                 </span>
               )}
 
@@ -267,12 +343,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
                 <span className="text-xs font-bold tracking-wide text-white truncate">
                   {getStatusTitle()}
                 </span>
-                {voiceState === 'SPEAKING' && (
-                  <span className="text-[10px] text-emerald-400 opacity-90 hidden sm:inline font-medium">
-                    (Speak to interrupt)
-                  </span>
-                )}
-                 <span className="text-[9px] uppercase px-1.5 py-0.2 rounded-md bg-slate-800 text-slate-300 font-bold border border-slate-700 shrink-0">
+                <span className="text-[9px] uppercase px-1.5 py-0.5 rounded-md bg-slate-800 text-slate-300 font-bold border border-slate-700 shrink-0">
                   {langPref === 'auto'
                     ? `AUTO • ${currentLang === 'english' ? 'EN' : 'HI'}`
                     : currentLang === 'english'
@@ -281,60 +352,63 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
                 </span>
               </div>
 
-              {/* Subline Preview */}
-              <div className="text-[11px] text-slate-400 truncate mt-0.5">
+              <div className="text-[11px] text-slate-300 truncate mt-0.5">
                 {getSublineText()}
               </div>
             </div>
           </div>
 
-          {/* Action Buttons */}
+          {/* Distinct Microphone / Session Controls (Clearly separated from Confirmation) */}
           <div className="flex items-center gap-1.5 shrink-0">
-            {voiceState === 'LISTENING' && (
+            {voiceState === 'LISTENING' && interimTranscript && (
               <button
+                type="button"
                 onClick={async () => {
                   await voiceSession.commitCurrentSpeech();
                 }}
-                className="px-2 py-1 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1 transition-all shadow-md shadow-emerald-950/40 cursor-pointer"
-                title="Finish speaking and process entire utterance"
-                aria-label="Process speech"
+                className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-[11px] flex items-center gap-1 transition-all cursor-pointer"
+                title="Process spoken sentence now"
+                aria-label="Process spoken sentence"
               >
-                <CheckCircle size={14} className="text-white" />
-                <span className="text-[11px] font-bold hidden sm:inline">{currentLang === 'hindi' ? 'पूरा हुआ' : 'Done'}</span>
+                <ArrowRight size={13} />
+                <span className="hidden sm:inline">{currentLang === 'hindi' ? 'प्रोसेस करें' : 'Process'}</span>
               </button>
             )}
 
             {voiceState !== 'IDLE' && (
               <button
+                type="button"
                 onClick={handleStop}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/80 transition-colors cursor-pointer"
-                title="End voice session"
-                aria-label="End conversation"
+                className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/80 transition-colors cursor-pointer"
+                title="Stop voice listening"
+                aria-label="Stop voice listening"
               >
                 <Square size={14} className="fill-current" />
               </button>
             )}
 
             <button
+              type="button"
               onClick={handleToggleVoice}
               className={`p-2 rounded-xl transition-all shadow-xs cursor-pointer ${
                 voiceState === 'IDLE'
                   ? 'bg-[#E85D43] hover:bg-[#D94E34] text-white'
-                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
               }`}
-              title={voiceState === 'IDLE' ? 'Start Jarvis Voice' : 'Pause/Toggle Mic'}
-              aria-label={voiceState === 'IDLE' ? 'Start Jarvis' : 'Toggle microphone'}
+              title={voiceState === 'IDLE' ? 'Start Voice Assistant' : 'Toggle Microphone'}
+              aria-label={voiceState === 'IDLE' ? 'Start Voice Assistant' : 'Toggle Microphone'}
             >
-              <Mic size={15} />
+              <Mic size={16} />
             </button>
 
             <button
+              type="button"
               onClick={() => setExpanded(!expanded)}
               className="p-1.5 text-slate-400 hover:text-white rounded-lg transition-colors cursor-pointer"
-              title={expanded ? 'Collapse panel' : 'Expand conversation'}
-              aria-label={expanded ? 'Collapse panel' : 'Expand conversation'}
+              title={expanded ? 'Collapse panel' : 'Expand panel'}
+              aria-label={expanded ? 'Collapse panel' : 'Expand panel'}
             >
-              {expanded ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+              {expanded ? <ChevronDown size={17} /> : <ChevronUp size={17} />}
             </button>
           </div>
         </div>
@@ -356,19 +430,20 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
           </div>
         )}
 
-        {/* Expanded Panel: Dialogue History + Language Controls + Developer Test Mode */}
-        {expanded && (
-          <div className="p-3.5 bg-black/40 border-t border-slate-800/90 space-y-3 text-xs">
-            {/* Quick Language Selector inside HUD */}
-            <div className="flex items-center justify-between gap-1 p-1 bg-slate-900/90 rounded-xl border border-slate-800">
-              <span className="text-[10px] font-semibold text-slate-400 pl-2 flex items-center gap-1">
-                <Globe size={11} className="text-[#E85D43]" />
-                <span>Voice Mode:</span>
+        {/* Expanded Panel */}
+        {(expanded || pendingConfirmation || saveSuccessMessage) && (
+          <div className="p-4 bg-[#141A21]/95 border-t border-slate-800 space-y-3.5 text-xs">
+            {/* Voice Language Mode Selector */}
+            <div className="flex items-center justify-between gap-1 p-1.5 bg-slate-900/90 rounded-xl border border-slate-800">
+              <span className="text-[11px] font-semibold text-slate-400 pl-2 flex items-center gap-1.5">
+                <Globe size={12} className="text-[#E85D43]" />
+                <span>Language:</span>
               </span>
               <div className="flex items-center gap-1">
                 <button
+                  type="button"
                   onClick={() => handleSetLanguage('auto')}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
                     langPref === 'auto'
                       ? 'bg-[#E85D43] text-white shadow-xs'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
@@ -377,8 +452,9 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
                   Auto ({currentLang === 'english' ? 'EN' : 'HI'})
                 </button>
                 <button
+                  type="button"
                   onClick={() => handleSetLanguage('english')}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
                     langPref === 'english'
                       ? 'bg-[#E85D43] text-white shadow-xs'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
@@ -387,8 +463,9 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
                   English
                 </button>
                 <button
+                  type="button"
                   onClick={() => handleSetLanguage('hindi')}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
                     langPref === 'hindi' || langPref === 'hinglish'
                       ? 'bg-[#E85D43] text-white shadow-xs'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
@@ -399,6 +476,198 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
               </div>
             </div>
 
+            {/* Post-Save Success Banner */}
+            {saveSuccessMessage && !pendingConfirmation && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="p-3.5 rounded-2xl bg-emerald-950/90 border-2 border-emerald-500/80 text-emerald-100 shadow-lg space-y-1 animate-in fade-in duration-200"
+              >
+                <div className="flex items-center gap-2 font-extrabold text-sm text-emerald-300">
+                  <CheckCircle2 size={18} className="text-emerald-400 shrink-0" />
+                  <span>{currentLang === 'english' ? 'Saved Successfully!' : 'सफलतापूर्वक सेव हो गया! (Saved)'}</span>
+                </div>
+                <p className="text-xs text-emerald-100 leading-relaxed pl-6">
+                  {saveSuccessMessage}
+                </p>
+              </div>
+            )}
+
+            {/* ==============================================================
+                PART 1 — HIGH-VISIBILITY VOICE CONFIRMATION CARD
+               ============================================================== */}
+            {pendingConfirmation && (
+              <div
+                role="region"
+                aria-label="Voice Transaction Confirmation Card"
+                className="p-4 rounded-2xl bg-slate-900 border-2 border-amber-400/90 shadow-2xl space-y-3.5"
+              >
+                {/* Header & Intent Badge */}
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className={`text-[11px] font-extrabold uppercase tracking-wider px-2.5 py-1 rounded-lg border ${getIntentBadgeInfo(isEditingConfirmation ? editIntent : pendingConfirmation.intent).color}`}>
+                    {getIntentBadgeInfo(isEditingConfirmation ? editIntent : pendingConfirmation.intent).label}
+                  </span>
+                  <span className="text-[11px] font-semibold text-amber-300/90">
+                    {pendingConfirmation.customerExists
+                      ? (currentLang === 'english' ? 'Existing Customer' : 'मौजूदा ग्राहक')
+                      : (currentLang === 'english' ? '✨ New Customer' : '✨ नया ग्राहक बनेगा')}
+                  </span>
+                </div>
+
+                {/* Read-Only Summary View vs Inline Edit View */}
+                {!isEditingConfirmation ? (
+                  <div className="p-3.5 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <div>
+                        <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                          {currentLang === 'english' ? 'Customer / Person' : 'ग्राहक का नाम (Person)'}
+                        </span>
+                        <span className="text-base font-extrabold text-white">
+                          {editPersonName || pendingConfirmation.personName}
+                        </span>
+                      </div>
+                      {(editAmount || pendingConfirmation.amount !== null) && (
+                        <div className="text-right">
+                          <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                            {currentLang === 'english' ? 'Amount (INR)' : 'राशि (Amount)'}
+                          </span>
+                          <span className="text-xl font-black text-emerald-400">
+                            ₹{Number(editAmount || pendingConfirmation.amount || 0).toLocaleString('en-IN')}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Balance Impact Preview */}
+                    {pendingConfirmation.amount !== null && pendingConfirmation.intent !== 'CREATE_CUSTOMER' && (
+                      <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-300">
+                        <span>
+                          {currentLang === 'english' ? 'Previous Balance:' : 'पुराना बकाया:'}{' '}
+                          <strong className="text-white">₹{(pendingConfirmation.existingBalance ?? 0).toLocaleString('en-IN')}</strong>
+                        </span>
+                        <span>→</span>
+                        <span>
+                          {currentLang === 'english' ? 'New Balance:' : 'नया कुल बकाया:'}{' '}
+                          <strong className="text-amber-300">
+                            ₹{(
+                              (pendingConfirmation.existingBalance ?? 0) +
+                              (editIntent === 'RECORD_PAYMENT_RECEIVED'
+                                ? -Number(editAmount || pendingConfirmation.amount || 0)
+                                : Number(editAmount || pendingConfirmation.amount || 0))
+                            ).toLocaleString('en-IN')}
+                          </strong>
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  /* Inline Edit Mode (✏️ Edit) */
+                  <div className="p-3 rounded-xl bg-slate-950 border border-slate-700 space-y-2.5">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
+                        {currentLang === 'english' ? 'Person / Customer Name' : 'ग्राहक का नाम (Person Name)'}
+                      </label>
+                      <input
+                        type="text"
+                        value={editPersonName}
+                        onChange={(e) => setEditPersonName(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white text-sm font-semibold focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+
+                    {pendingConfirmation.intent !== 'CREATE_CUSTOMER' && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
+                            {currentLang === 'english' ? 'Amount (₹)' : 'राशि (₹ Amount)'}
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            step="any"
+                            value={editAmount}
+                            onChange={(e) => setEditAmount(e.target.value)}
+                            className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white text-sm font-bold focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
+                            {currentLang === 'english' ? 'Direction / Type' : 'लेनदेन का प्रकार'}
+                          </label>
+                          <select
+                            value={editIntent}
+                            onChange={(e) => setEditIntent(e.target.value as StrictVoiceIntent)}
+                            className="w-full px-2.5 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white text-xs font-semibold focus:outline-none focus:border-emerald-500"
+                          >
+                            <option value="ADD_RECEIVABLE">Receivable (लेने हैं)</option>
+                            <option value="ADD_PAYMENT_GIVEN">Payment Given (दिए)</option>
+                            <option value="RECORD_PAYMENT_RECEIVED">Payment Received (मिले)</option>
+                          </select>
+                        </div>
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
+                        {currentLang === 'english' ? 'Note / Description (Optional)' : 'विवरण (Description)'}
+                      </label>
+                      <input
+                        type="text"
+                        value={editDescription}
+                        onChange={(e) => setEditDescription(e.target.value)}
+                        placeholder="Optional note..."
+                        className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-white text-xs focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* PRIMARY ACTION BUTTON: ✅ Confirm & Save (54px height, full-width, keyboard accessible, anti-double-submit) */}
+                <button
+                  type="button"
+                  autoFocus
+                  disabled={isSavingConfirmation}
+                  onClick={handleConfirmAndSave}
+                  className="w-full min-h-[54px] px-5 py-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 disabled:bg-emerald-800 disabled:opacity-75 disabled:cursor-not-allowed text-white font-extrabold text-base tracking-wide shadow-xl shadow-emerald-950/60 border border-emerald-400/40 flex items-center justify-center gap-2.5 transition-all cursor-pointer focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-offset-2 focus:ring-offset-slate-900"
+                  aria-label="Confirm and Save transaction"
+                >
+                  {isSavingConfirmation ? (
+                    <>
+                      <Loader2 size={20} className="animate-spin text-white shrink-0" />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    <span>✅ Confirm &amp; Save</span>
+                  )}
+                </button>
+
+                {/* SECONDARY CONTROLS: ✏️ Edit & ❌ Cancel (Clearly subordinate to Confirm & Save) */}
+                <div className="grid grid-cols-2 gap-2.5 pt-0.5">
+                  <button
+                    type="button"
+                    disabled={isSavingConfirmation}
+                    onClick={() => setIsEditingConfirmation(!isEditingConfirmation)}
+                    className="min-h-[42px] px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-semibold text-xs border border-slate-600/80 flex items-center justify-center gap-1.5 transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-slate-400"
+                    aria-label="Edit transaction details before saving"
+                  >
+                    <Pencil size={13} className="shrink-0" />
+                    <span>{isEditingConfirmation ? 'Done Editing' : '✏️ Edit'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isSavingConfirmation}
+                    onClick={handleCancelConfirmation}
+                    className="min-h-[42px] px-3 py-2 rounded-xl bg-slate-900 hover:bg-rose-950/50 disabled:opacity-50 text-slate-300 hover:text-rose-200 font-semibold text-xs border border-slate-700/80 flex items-center justify-center gap-1.5 transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-rose-400"
+                    aria-label="Cancel pending transaction"
+                  >
+                    <XCircle size={13} className="shrink-0" />
+                    <span>❌ Cancel</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Quick Command Input (Voice & Text Dual Input) */}
             <form
               onSubmit={(e) => {
@@ -408,29 +677,29 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
                   setTypedCommand('');
                 }
               }}
-              className="flex items-center gap-1.5 p-1 bg-slate-900/90 rounded-xl border border-slate-800 focus-within:border-[#E85D43]/60 transition-colors"
+              className="flex items-center gap-1.5 p-1.5 bg-slate-900/90 rounded-xl border border-slate-800 focus-within:border-[#E85D43]/60 transition-colors"
             >
               <input
                 type="text"
                 value={typedCommand}
                 onChange={(e) => setTypedCommand(e.target.value)}
-                placeholder={currentLang === 'hindi' ? 'कमांड बोलें या यहाँ टाइप करें...' : 'Speak command or type here...'}
+                placeholder={currentLang === 'hindi' ? 'कमांड बोलें या यहाँ टाइप करें (जैसे: Ram se 500 lene hain)...' : 'Speak or type command (e.g. Ram se 500 lene hain)...'}
                 className="flex-1 bg-transparent px-2.5 py-1 text-xs text-white placeholder-slate-500 focus:outline-none"
               />
               <button
                 type="submit"
                 disabled={!typedCommand.trim()}
-                className="p-1.5 rounded-lg bg-[#E85D43] hover:bg-[#D94E34] disabled:opacity-40 disabled:hover:bg-[#E85D43] text-white transition-all cursor-pointer"
-                title="Send command to Jarvis"
+                className="p-2 rounded-lg bg-[#E85D43] hover:bg-[#D94E34] disabled:opacity-40 disabled:hover:bg-[#E85D43] text-white transition-all cursor-pointer"
+                title="Send command"
               >
-                <ArrowRight size={13} />
+                <ArrowRight size={14} />
               </button>
             </form>
 
             {/* Active Dialogue Turns */}
-            <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+            <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
               {interimTranscript && (
-                <div className="flex items-start gap-2 p-2 rounded-xl bg-[#E85D43]/20 border border-[#E85D43]/50 text-amber-200 animate-pulse">
+                <div className="flex items-start gap-2 p-2.5 rounded-xl bg-[#E85D43]/20 border border-[#E85D43]/50 text-amber-200 animate-pulse">
                   <span className="font-bold text-[#E85D43] shrink-0 text-[11px] uppercase tracking-wider flex items-center gap-1">
                     <span className="w-1.5 h-1.5 rounded-full bg-[#E85D43] animate-ping" />
                     {currentLang === 'hindi' ? 'सुन रहा हूँ:' : 'Listening:'}
@@ -459,16 +728,6 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
                   </div>
                 </div>
               )}
-
-              {!lastUserUtterance && !lastMessage && voiceState !== 'ERROR' && (
-                <div className="text-slate-400 italic text-center py-2 text-[11px]">
-                  {currentLang === 'hindi'
-                    ? '"हे जार्विस" बोलें या किसी भी काम के लिए माइक पर बात करें।'
-                    : (currentLang === 'english'
-                        ? 'Say "Hey Jarvis" or speak naturally in English.'
-                        : 'Say "Hey Jarvis" or speak naturally in Hindi, Hinglish, or English.')}
-                </div>
-              )}
             </div>
 
             {/* Error & Compulsory Permission Prompt */}
@@ -482,13 +741,14 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
                   Allow microphone access in your browser to speak commands and use Jarvis wake word.
                 </p>
                 <button
+                  type="button"
                   onClick={async () => {
                     const res = await voiceSession.requestMicPermission();
                     if (res.granted) {
                       void voiceSession.start();
                     }
                   }}
-                  className="w-full py-2 px-3 rounded-lg bg-[#E85D43] hover:bg-[#D94E34] text-white font-bold text-xs transition-colors cursor-pointer flex items-center justify-center gap-2 shadow-md shadow-[#E85D43]/20"
+                  className="w-full py-2.5 px-3 rounded-lg bg-[#E85D43] hover:bg-[#D94E34] text-white font-bold text-xs transition-colors cursor-pointer flex items-center justify-center gap-2 shadow-md shadow-[#E85D43]/20"
                 >
                   <Mic size={14} />
                   <span>Turn On Microphone Now</span>
@@ -496,60 +756,35 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
               </div>
             )}
 
-            {/* Confirmation Quick Action Bar (when waiting for confirmation) */}
-            {voiceState === 'WAITING_FOR_CONFIRMATION' && (
-              <div className="p-2.5 rounded-xl bg-amber-950/50 border border-amber-500/50 space-y-2">
-                <span className="text-[11px] font-semibold text-amber-300 block">
-                  {currentLang === 'hindi' ? 'पुष्टि करने के लिए "हाँ" बोलें या टैप करें:' : (currentLang === 'english' ? 'Say "Yes" to confirm or tap:' : 'Say "Haan" / "Yes" to confirm or tap:')}
-                </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => handleSimulateUtterance(currentLang === 'english' ? 'yes' : 'haan')}
-                    className="flex-1 py-1.5 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors cursor-pointer text-center"
-                  >
-                    {currentLang === 'hindi' ? 'हाँ (Confirm)' : (currentLang === 'english' ? 'Confirm (Yes)' : 'Haan (Confirm)')}
-                  </button>
-                  <button
-                    onClick={() => handleSimulateUtterance(currentLang === 'english' ? 'no' : 'nahi')}
-                    className="flex-1 py-1.5 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition-colors cursor-pointer text-center"
-                  >
-                    {currentLang === 'hindi' ? 'नहीं (Cancel)' : (currentLang === 'english' ? 'Cancel (No)' : 'Nahi (Cancel)')}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Discrete Dev Test Prompts (Supports English, Hinglish, Hindi) */}
+            {/* Quick Voice Test Prompts (Hindi, Hinglish, English) */}
             <div className="pt-2 border-t border-slate-800/80">
               <button
+                type="button"
                 onClick={() => setShowDevTestMode(!showDevTestMode)}
                 className="flex items-center justify-between w-full text-[10px] font-semibold text-slate-400 hover:text-slate-200 transition-colors cursor-pointer"
               >
                 <span className="flex items-center gap-1.5">
                   <SlidersHorizontal size={11} />
-                  <span>Sample Voice Prompts ({currentLang.toUpperCase()})</span>
+                  <span>Test Hindi / Hinglish / English Commands</span>
                 </span>
                 <span>{showDevTestMode ? 'Hide ▲' : 'Show ▼'}</span>
               </button>
 
               {showDevTestMode && (
                 <div className="mt-2 space-y-2 animate-in fade-in duration-200">
-                  {/* English Prompts */}
                   <div>
-                    <span className="text-[10px] font-bold text-slate-400 block mb-1 uppercase tracking-wider">English:</span>
+                    <span className="text-[10px] font-bold text-slate-400 block mb-1 uppercase tracking-wider">Receivable (Lena Hai):</span>
                     <div className="flex flex-wrap gap-1">
                       {[
-                        'Add 1000 debit to Kripa Shankar',
-                        'What is Ravi balance?',
-                        'Add 500 credit to Suresh',
-                        'Open customers ledger',
-                        'Show billing page',
-                        'What is total market udhar?',
-                        'Show today sales report',
-                        'Thank you, that is all',
+                        'Ram se 500 lene hain',
+                        'राम से 500 रुपये लेने हैं',
+                        'I need to collect 500 from Ram',
+                        'Ram se paanch sau lene hain',
+                        'Rahul se 2.5 thousand lene hain',
                       ].map((phrase, i) => (
                         <button
                           key={i}
+                          type="button"
                           onClick={() => handleSimulateUtterance(phrase)}
                           className="text-[10.5px] px-2 py-0.5 rounded-lg bg-slate-800/90 hover:bg-[#E85D43] text-slate-200 hover:text-white transition-colors cursor-pointer"
                         >
@@ -559,23 +794,20 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
                     </div>
                   </div>
 
-                  {/* Hindi & Hinglish Prompts */}
                   <div>
-                    <span className="text-[10px] font-bold text-slate-400 block mb-1 uppercase tracking-wider">Hindi & Hinglish:</span>
+                    <span className="text-[10px] font-bold text-slate-400 block mb-1 uppercase tracking-wider">Payment Given &amp; Received:</span>
                     <div className="flex flex-wrap gap-1">
                       {[
-                        'कृपा शंकर के अकाउंट में ₹1000 उधर लिख दो',
-                        'सुरेश के खाते में ₹500 जमा लिखो',
+                        'Ram ko 500 diye',
+                        'I gave Ram 500',
+                        'Ram ko do hazaar diye',
+                        'Ram ne mujhe 500 wapas diye',
+                        'Ram ne 500 return kar diye',
                         'Ravi ka balance batao',
-                        'Usmein 500 add kar do',
-                        'Theek hai',
-                        'Total udhar kitna hai?',
-                        'Customers kholo',
-                        'Billing page kholo',
-                        'Aaj kitna paisa aaya?',
                       ].map((phrase, i) => (
                         <button
                           key={i}
+                          type="button"
                           onClick={() => handleSimulateUtterance(phrase)}
                           className="text-[10.5px] px-2 py-0.5 rounded-lg bg-slate-800/90 hover:bg-[#E85D43] text-slate-200 hover:text-white transition-colors cursor-pointer"
                         >

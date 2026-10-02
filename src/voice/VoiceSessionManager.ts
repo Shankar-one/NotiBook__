@@ -1,6 +1,6 @@
 import { AudioManager } from './AudioManager';
 import { VoiceOrchestrator } from './VoiceOrchestrator';
-import { VoiceState, ConversationTurn } from './types';
+import { VoiceState, ConversationTurn, PendingConfirmation } from './types';
 import { ActionRouterCallbacks } from './ActionRouter';
 import { UserLanguage, PreferredLanguage } from './LanguageUtils';
 
@@ -11,6 +11,7 @@ export interface VoiceSessionSubscriber {
   onVolumeChange?: (volume: number) => void;
   onJarvisMessage?: (message: string, lang?: UserLanguage) => void;
   onLanguageChange?: (lang: UserLanguage, pref: PreferredLanguage) => void;
+  onPendingConfirmationChange?: (pending: PendingConfirmation | null) => void;
 }
 
 export class VoiceSessionManager {
@@ -50,6 +51,9 @@ export class VoiceSessionManager {
           this.lastJarvisLang = lang;
           this.subscribers.forEach((s) => s.onLanguageChange?.(lang, pref));
         },
+        onPendingConfirmationChange: (pending) => {
+          this.subscribers.forEach((s) => s.onPendingConfirmationChange?.(pending));
+        },
       }
     );
   }
@@ -87,6 +91,9 @@ export class VoiceSessionManager {
         this.lastJarvisLang = lang;
         this.subscribers.forEach((s) => s.onLanguageChange?.(lang, pref));
       },
+      onPendingConfirmationChange: (pending) => {
+        this.subscribers.forEach((s) => s.onPendingConfirmationChange?.(pending));
+      },
     });
   }
 
@@ -95,6 +102,7 @@ export class VoiceSessionManager {
     // Initial emit
     subscriber.onStateChange?.(this.orchestrator.getState());
     subscriber.onLanguageChange?.(this.orchestrator.getCurrentVoiceLanguage(), this.orchestrator.getLanguagePreference());
+    subscriber.onPendingConfirmationChange?.(this.orchestrator.getPendingConfirmation() || null);
     if (this.lastJarvisMessage) {
       subscriber.onJarvisMessage?.(this.lastJarvisMessage, this.lastJarvisLang);
     }
@@ -117,6 +125,20 @@ export class VoiceSessionManager {
 
   public getContextManager() {
     return this.orchestrator.getContextManager();
+  }
+
+  public getPendingConfirmation(): PendingConfirmation | undefined {
+    return this.orchestrator.getPendingConfirmation();
+  }
+
+  public async confirmPendingAction(
+    editedFields?: Partial<PendingConfirmation>
+  ): Promise<{ success: boolean; reply: string }> {
+    return await this.orchestrator.confirmPendingAction(editedFields);
+  }
+
+  public async cancelPendingAction(): Promise<string> {
+    return await this.orchestrator.cancelPendingAction();
   }
 
   public setLanguage(pref: PreferredLanguage): void {

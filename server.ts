@@ -7,8 +7,8 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { WebSocketServer } from 'ws';
 import { SemanticActionPlanner, DatabaseSnapshot } from './src/voice/SemanticActionPlanner';
 import { cleanExtractedCustomerName, FORBIDDEN_CUSTOMER_PHRASES } from './src/voice/CustomerResolver';
-import { SemanticActionPlan, ExecutionResult } from './src/voice/types';
-import { detectLanguage, toDevanagariForHindiTTS, prepareEnglishForTTS } from './src/voice/LanguageUtils';
+import { SemanticActionPlan, ExecutionResult, PendingConfirmation, StrictVoiceIntent } from './src/voice/types';
+import { detectLanguage, toDevanagariForHindiTTS, prepareEnglishForTTS, isConfirmationUtterance, isCancellationUtterance } from './src/voice/LanguageUtils';
 
 dotenv.config();
 
@@ -108,7 +108,7 @@ let stockMovements = [
   { id: 'sm-2', productId: 'prod-2', productName: 'Reynolds Ballpoint Pen Blue (Pack of 10)', changeQty: -2, reason: 'SALE', referenceId: '#INV-1001', date: '2024-06-18', finalQty: 40 },
 ];
 
-let transactions = [
+let transactions: any[] = [
   { id: 'tx-1', date: '2024-06-18 10:15', type: 'in', category: 'Sale', description: 'Cash sale (Stationery)', partyName: 'Walk-In Customer', paymentMode: 'Cash', amount: 500 },
   { id: 'tx-2', date: '2024-06-18 09:40', type: 'in', category: 'Sale', description: 'Paint & Roller invoice', partyName: 'Rahul Sharma', paymentMode: 'UPI', amount: 4685 },
   { id: 'tx-3', date: '2024-06-18 08:30', type: 'out', category: 'Expense', description: 'Tea and breakfast for shop assistants', partyName: 'Sharma Tea Stall', paymentMode: 'Cash', amount: 140 },
@@ -545,6 +545,307 @@ app.get('/api/reports/summary', (req, res) => {
 // --- GENERAL SEMANTIC INTERPRETATION & EXECUTION ENGINE ---
 const planner = new SemanticActionPlanner(apiKey);
 
+const MUTATING_VOICE_INTENTS = new Set<string>([
+  'ADD_RECEIVABLE',
+  'ADD_PAYMENT_GIVEN',
+  'RECORD_PAYMENT_RECEIVED',
+  'CREATE_CUSTOMER',
+  'UPDATE_TRANSACTION',
+  'DELETE_TRANSACTION',
+]);
+
+function getIntentSummaryTitle(intent: StrictVoiceIntent, lang: 'hindi' | 'hinglish' | 'english'): string {
+  switch (intent) {
+    case 'ADD_RECEIVABLE':
+      return lang === 'hindi' ? 'उधार / लेनदारी जोड़ें (Add Receivable)' : 'Add Receivable (Udhar Lena)';
+    case 'ADD_PAYMENT_GIVEN':
+      return lang === 'hindi' ? 'भुगतान दिया गया (Payment Given)' : 'Add Payment Given (Paisa Diya)';
+    case 'RECORD_PAYMENT_RECEIVED':
+      return lang === 'hindi' ? 'भुगतान प्राप्त हुआ (Payment Received)' : 'Record Payment Received (Jama)';
+    case 'CREATE_CUSTOMER':
+      return lang === 'hindi' ? 'नया ग्राहक जोड़ें (Create Customer)' : 'Create New Customer';
+    case 'UPDATE_TRANSACTION':
+      return lang === 'hindi' ? 'लेनदेन अपडेट करें (Update Entry)' : 'Update Transaction';
+    case 'DELETE_TRANSACTION':
+      return lang === 'hindi' ? 'लेनदेन हटाएं (Delete Entry)' : 'Delete Transaction';
+    default:
+      return 'Confirm Action';
+  }
+}
+
+function buildPreSaveConfirmationPrompt(
+  pending: PendingConfirmation,
+  rawLang: 'hindi' | 'hinglish' | 'english'
+): string {
+  const isHindi = rawLang !== 'english';
+  const name = pending.personName || 'Customer';
+  const amtStr = pending.amount ? `₹${pending.amount.toLocaleString('en-IN')}` : '';
+
+  if (pending.intent === 'ADD_RECEIVABLE') {
+    if (isHindi) {
+      return `${name} से ${amtStr} लेने हैं। सेव करने के लिए "Confirm & Save" बटन दबाएं या "हाँ" बोलें।`;
+    }
+    return `Add ${amtStr} receivable from ${name}. Please tap "Confirm & Save" or say "Yes" to save.`;
+  }
+
+  if (pending.intent === 'ADD_PAYMENT_GIVEN') {
+    if (isHindi) {
+      return `${name} को ${amtStr} दिए गए हैं। सेव करने के लिए "Confirm & Save" बटन दबाएं या "हाँ" बोलें।`;
+    }
+    return `Record ${amtStr} payment given to ${name}. Please tap "Confirm & Save" or say "Yes" to save.`;
+  }
+
+  if (pending.intent === 'RECORD_PAYMENT_RECEIVED') {
+    if (isHindi) {
+      return `${name} से ${amtStr} वापस प्राप्त हुए। सेव करने के लिए "Confirm & Save" बटन दबाएं या "हाँ" बोलें।`;
+    }
+    return `Record ${amtStr} payment received from ${name}. Please tap "Confirm & Save" or say "Yes" to save.`;
+  }
+
+  if (pending.intent === 'CREATE_CUSTOMER') {
+    if (isHindi) {
+      return `"${name}" नाम से नया ग्राहक बनाना है। सेव करने के लिए "Confirm & Save" दबाएं।`;
+    }
+    return `Create new customer "${name}". Please tap "Confirm & Save" to confirm.`;
+  }
+
+  if (pending.intent === 'DELETE_TRANSACTION') {
+    if (isHindi) {
+      return `${name} की पिछली एंट्री हटानी है। पुष्टि करने के लिए "Confirm & Save" दबाएं।`;
+    }
+    return `Delete the last transaction for ${name}. Please tap "Confirm & Save" to confirm.`;
+  }
+
+  if (pending.intent === 'UPDATE_TRANSACTION') {
+    if (isHindi) {
+      return `${name} की एंट्री को ${amtStr} पर अपडेट करना है। पुष्टि करने के लिए "Confirm & Save" दबाएं।`;
+    }
+    return `Update ${name}'s transaction to ${amtStr}. Please tap "Confirm & Save" to confirm.`;
+  }
+
+  return isHindi
+    ? 'कृपया सेव करने के लिए "Confirm & Save" दबाएं।'
+    : 'Please tap "Confirm & Save" to confirm.';
+}
+
+function executeConfirmedMutation(
+  confirmation: PendingConfirmation,
+  context: any
+) {
+  const executionResults: any[] = [];
+  const toolCalls: any[] = [];
+  let activeCustomerTarget: any = null;
+  let latestTransactionCreated: any = null;
+  const rawLang: 'hindi' | 'hinglish' | 'english' = confirmation.lang || 'hindi';
+  const isHindi = rawLang !== 'english';
+
+  const cleanName = cleanExtractedCustomerName(confirmation.personName) || confirmation.personName.trim();
+  const amt = Number(confirmation.amount) || 0;
+  const intent = confirmation.intent;
+  const paymentMode = confirmation.paymentMode || 'Cash';
+
+  // Helper to find or create customer
+  const findOrCreateCustomer = (name: string): { customer: any; createdNew: boolean } => {
+    let existing = customers.find(
+      c => c.name.toLowerCase() === name.toLowerCase() || c.name.toLowerCase().startsWith(name.toLowerCase() + ' ')
+    );
+    if (existing) {
+      return { customer: existing, createdNew: false };
+    }
+    const newCust = {
+      id: `cust-${Date.now()}`,
+      name,
+      phone: '',
+      address: '',
+      balance: 0,
+      lastTransactionDate: new Date().toISOString().slice(0, 10),
+      status: 'settled',
+      createdAt: new Date().toISOString().slice(0, 10),
+    };
+    customers.unshift(newCust);
+    toolCalls.push({
+      name: 'add_customer',
+      args: { name: newCust.name, phone: newCust.phone, customer: newCust },
+    });
+    executionResults.push({ action: 'CREATE_CUSTOMER', success: true, customer: newCust });
+    return { customer: newCust, createdNew: true };
+  };
+
+  if (intent === 'CREATE_CUSTOMER') {
+    const existing = customers.find(c => c.name.toLowerCase() === cleanName.toLowerCase());
+    if (existing) {
+      activeCustomerTarget = existing;
+      executionResults.push({ action: 'CREATE_CUSTOMER', success: true, customer: existing, existed: true });
+      const reply = isHindi
+        ? `"${existing.name}" पहले से ही आपकी ग्राहक सूची में मौजूद हैं।`
+        : `"${existing.name}" already exists in your customer list.`;
+      return { reply, executionResults, toolCalls, activeCustomerTarget, latestTransactionCreated };
+    }
+    const { customer } = findOrCreateCustomer(cleanName);
+    activeCustomerTarget = customer;
+    const reply = isHindi
+      ? `नया ग्राहक "${customer.name}" सफलतापूर्वक जोड़ दिया गया है।`
+      : `New customer "${customer.name}" has been created and saved.`;
+    return { reply, executionResults, toolCalls, activeCustomerTarget, latestTransactionCreated };
+  }
+
+  if (intent === 'ADD_RECEIVABLE' || intent === 'ADD_PAYMENT_GIVEN') {
+    const { customer: cust, createdNew } = findOrCreateCustomer(cleanName);
+    const prevBal = cust.balance;
+    cust.balance += amt;
+    cust.status = cust.balance > 0 ? 'due' : (cust.balance < 0 ? 'advance' : 'settled');
+    cust.lastTransactionDate = new Date().toISOString().slice(0, 10);
+
+    const defaultDesc = intent === 'ADD_RECEIVABLE'
+      ? `Receivable from ${cust.name} (Udhar)`
+      : `Payment given to ${cust.name}`;
+    const newTx = {
+      id: `tx-${Date.now()}`,
+      date: new Date().toLocaleString('en-IN', { hour12: false }),
+      type: 'out',
+      category: intent === 'ADD_RECEIVABLE' ? 'Customer Credit' : 'Payment Given',
+      description: confirmation.description || defaultDesc,
+      partyName: cust.name,
+      paymentMode,
+      amount: amt,
+      customerId: cust.id,
+    };
+    transactions.unshift(newTx);
+    activeCustomerTarget = cust;
+    latestTransactionCreated = newTx;
+
+    toolCalls.push({
+      name: 'add_transaction',
+      args: {
+        customer_name: cust.name,
+        amount: amt,
+        transaction_type: 'debit',
+        payment_mode: paymentMode,
+        customer: cust,
+        transaction: newTx,
+      },
+    });
+    executionResults.push({
+      action: intent,
+      success: true,
+      customer: cust,
+      transaction: newTx,
+      prevBal,
+      newBal: cust.balance,
+      createdNew,
+    });
+
+    const reply = intent === 'ADD_RECEIVABLE'
+      ? (isHindi
+          ? `${cust.name} के खाते में ₹${amt.toLocaleString('en-IN')} लेनदारी (उधार) सेव कर दी गई है। अब कुल बकाया ₹${cust.balance.toLocaleString('en-IN')} है।`
+          : `Saved! ₹${amt.toLocaleString('en-IN')} receivable added for ${cust.name}. Total balance is now ₹${cust.balance.toLocaleString('en-IN')}.`)
+      : (isHindi
+          ? `${cust.name} को दिए गए ₹${amt.toLocaleString('en-IN')} खाते में सेव कर दिए गए हैं। अब कुल बकाया ₹${cust.balance.toLocaleString('en-IN')} है।`
+          : `Saved! Recorded ₹${amt.toLocaleString('en-IN')} payment given to ${cust.name}. Total balance is now ₹${cust.balance.toLocaleString('en-IN')}.`);
+
+    return { reply, executionResults, toolCalls, activeCustomerTarget, latestTransactionCreated };
+  }
+
+  if (intent === 'RECORD_PAYMENT_RECEIVED') {
+    const { customer: cust, createdNew } = findOrCreateCustomer(cleanName);
+    const prevBal = cust.balance;
+    cust.balance -= amt;
+    cust.status = cust.balance > 0 ? 'due' : (cust.balance < 0 ? 'advance' : 'settled');
+    cust.lastTransactionDate = new Date().toISOString().slice(0, 10);
+
+    const newTx = {
+      id: `tx-${Date.now()}`,
+      date: new Date().toLocaleString('en-IN', { hour12: false }),
+      type: 'in',
+      category: 'Customer Payment',
+      description: confirmation.description || `Payment received from ${cust.name}`,
+      partyName: cust.name,
+      paymentMode,
+      amount: amt,
+      customerId: cust.id,
+    };
+    transactions.unshift(newTx);
+    activeCustomerTarget = cust;
+    latestTransactionCreated = newTx;
+
+    toolCalls.push({
+      name: 'add_transaction',
+      args: {
+        customer_name: cust.name,
+        amount: amt,
+        transaction_type: 'credit',
+        payment_mode: paymentMode,
+        customer: cust,
+        transaction: newTx,
+      },
+    });
+    executionResults.push({
+      action: intent,
+      success: true,
+      customer: cust,
+      transaction: newTx,
+      prevBal,
+      newBal: cust.balance,
+      createdNew,
+    });
+
+    const isSettled = cust.balance <= 0;
+    const reply = isHindi
+      ? `${cust.name} से ₹${amt.toLocaleString('en-IN')} प्राप्त होने की एंट्री सेव हो गई है। अब बकाया ₹${cust.balance.toLocaleString('en-IN')} है।${isSettled ? ' खाता चुकता हो गया है।' : ''}`
+      : `Saved! Received ₹${amt.toLocaleString('en-IN')} from ${cust.name}. Remaining balance is ₹${cust.balance.toLocaleString('en-IN')}.${isSettled ? ' Account is settled.' : ''}`;
+
+    return { reply, executionResults, toolCalls, activeCustomerTarget, latestTransactionCreated };
+  }
+
+  if (intent === 'DELETE_TRANSACTION') {
+    const txIndex = transactions.findIndex(t =>
+      !cleanName || t.partyName?.toLowerCase().includes(cleanName.toLowerCase())
+    );
+    if (txIndex !== -1) {
+      const removed = transactions.splice(txIndex, 1)[0];
+      const cust = customers.find(c => c.id === removed.customerId || c.name.toLowerCase() === removed.partyName?.toLowerCase());
+      if (cust) {
+        if (removed.type === 'out') cust.balance -= removed.amount;
+        else cust.balance += removed.amount;
+        cust.status = cust.balance > 0 ? 'due' : (cust.balance < 0 ? 'advance' : 'settled');
+        activeCustomerTarget = cust;
+      }
+      toolCalls.push({ name: 'delete_transaction', args: { id: removed.id, customer: cust } });
+      executionResults.push({ action: 'DELETE_TRANSACTION', success: true, transaction: removed });
+      const reply = isHindi
+        ? `${removed.partyName} की ₹${removed.amount.toLocaleString('en-IN')} वाली एंट्री हटा दी गई है।`
+        : `Deleted the ₹${removed.amount.toLocaleString('en-IN')} transaction for ${removed.partyName}.`;
+      return { reply, executionResults, toolCalls, activeCustomerTarget, latestTransactionCreated };
+    }
+  }
+
+  if (intent === 'UPDATE_TRANSACTION') {
+    const tx = transactions.find(t =>
+      !cleanName || t.partyName?.toLowerCase().includes(cleanName.toLowerCase())
+    );
+    if (tx && amt > 0) {
+      const diff = amt - tx.amount;
+      tx.amount = amt;
+      const cust = customers.find(c => c.id === tx.customerId || c.name.toLowerCase() === tx.partyName?.toLowerCase());
+      if (cust) {
+        if (tx.type === 'out') cust.balance += diff;
+        else cust.balance -= diff;
+        cust.status = cust.balance > 0 ? 'due' : (cust.balance < 0 ? 'advance' : 'settled');
+        activeCustomerTarget = cust;
+      }
+      latestTransactionCreated = tx;
+      executionResults.push({ action: 'UPDATE_TRANSACTION', success: true, transaction: tx, customer: cust });
+      const reply = isHindi
+        ? `${tx.partyName} की एंट्री को ₹${amt.toLocaleString('en-IN')} पर अपडेट कर दिया गया है।`
+        : `Updated ${tx.partyName}'s transaction amount to ₹${amt.toLocaleString('en-IN')}.`;
+      return { reply, executionResults, toolCalls, activeCustomerTarget, latestTransactionCreated };
+    }
+  }
+
+  const fallbackReply = isHindi ? 'एंट्री सेव कर दी गई है।' : 'Entry has been confirmed and saved.';
+  return { reply: fallbackReply, executionResults, toolCalls, activeCustomerTarget, latestTransactionCreated };
+}
+
 function generateTruthfulResponse(
   plan: SemanticActionPlan,
   results: any[],
@@ -561,155 +862,89 @@ function generateTruthfulResponse(
   // 1. END CONVERSATION
   if (plan.primaryIntent === 'END_CONVERSATION') {
     if (lang === 'hindi') return 'ठीक है, बहुत धन्यवाद! आपका दिन शुभ हो।';
-    if (lang === 'english') return 'Alright, thank you! Have a great day.';
-    return 'Theek hai, dhanyawad! Have a great day.';
+    return 'Alright, thank you! Have a great day.';
   }
 
-  // 2. NAVIGATE
+  // 2. CANCEL_LAST_ACTION
+  const cancelRes = results.find(r => r.action === 'CANCEL_LAST_ACTION');
+  if (cancelRes) {
+    if (cancelRes.success && cancelRes.undoneTx) {
+      return lang === 'hindi'
+        ? `पिछली ₹${cancelRes.undoneTx.amount.toLocaleString('en-IN')} की एंट्री वापस ले ली गई है।`
+        : `Undid the last ₹${cancelRes.undoneTx.amount.toLocaleString('en-IN')} transaction.`;
+    }
+    return lang === 'hindi' ? 'कोई पिछला एक्शन रद्द करने के लिए नहीं है।' : 'No recent action to cancel.';
+  }
+
+  // 3. NAVIGATE
   const navResult = results.find(r => r.action === 'NAVIGATE');
-  if (navResult && results.length === 1) {
+  const balRes = results.find(r => r.action === 'GET_CUSTOMER_BALANCE' || r.action === 'GET_LEDGER');
+  if (navResult && !balRes) {
     const dest = (navResult as any).destination || 'page';
-    const friendlyName = dest === 'customers' ? (lang === 'hindi' ? 'कस्टमर लिस्ट' : (lang === 'english' ? 'Customers page' : 'Customers tab')) :
-      dest === 'transactions' ? (lang === 'hindi' ? 'लेनदेन पासबुक' : (lang === 'english' ? 'Transactions passbook' : 'Transactions page')) :
+    const friendlyName = dest === 'customers' ? (lang === 'hindi' ? 'कस्टमर लिस्ट' : 'Customers page') :
+      dest === 'transactions' ? (lang === 'hindi' ? 'लेनदेन पासबुक' : 'Transactions passbook') :
       dest === 'billing' ? (lang === 'hindi' ? 'बिलिंग व इनवॉइस' : 'Billing tab') :
       dest === 'stocks' ? (lang === 'hindi' ? 'स्टॉक व इन्वेंट्री' : 'Stocks inventory') :
       dest === 'customer_ledger_modal' ? (targetCustomer ? `${targetCustomer.name} का खाता` : 'Customer ledger') :
       dest === 'settings_modal' ? 'Settings' : dest;
 
     if (lang === 'hindi') return `${friendlyName} खोल दिया गया है।`;
-    if (lang === 'english') return `Opening ${friendlyName}.`;
-    return `${friendlyName} open kar diya hai.`;
+    return `Opening ${friendlyName}.`;
   }
 
-  // 3. MULTI-ACTION (e.g. Create customer + Add debt)
-  const createCustRes = results.find(r => r.action === 'CREATE_CUSTOMER');
-  const addDebtRes = results.find(r => r.action === 'ADD_CUSTOMER_DEBT');
-  const recordPayRes = results.find(r => r.action === 'RECORD_PAYMENT');
-
-  if (createCustRes && addDebtRes && addDebtRes.success) {
-    const custName = createCustRes.customer?.name || addDebtRes.customer?.name || 'Customer';
-    const amt = addDebtRes.transaction?.amount ?? 0;
-    const finalBal = addDebtRes.newBal ?? amt;
-
-    if (lang === 'hindi') {
-      return `नया ग्राहक "${custName}" जोड़ दिया गया है और उनके खाते में ₹${amt.toLocaleString('en-IN')} उधार लिख दिए हैं। अब उनका कुल बकाया ₹${finalBal.toLocaleString('en-IN')} है।`;
-    }
-    if (lang === 'english') {
-      return `Added "${custName}" as a new customer and recorded ₹${amt.toLocaleString('en-IN')} credit in their account. Total balance is now ₹${finalBal.toLocaleString('en-IN')}.`;
-    }
-    return `"${custName}" ko naya customer add kar diya aur unke khate mein ₹${amt.toLocaleString('en-IN')} udhar likh diya hai. Ab unka total balance ₹${finalBal.toLocaleString('en-IN')} hai.`;
-  }
-
-  if (createCustRes && recordPayRes && recordPayRes.success) {
-    const custName = createCustRes.customer?.name || recordPayRes.customer?.name || 'Customer';
-    const amt = recordPayRes.transaction?.amount ?? 0;
-
-    if (lang === 'hindi') {
-      return `नया ग्राहक "${custName}" जोड़ दिया गया है और उनसे ₹${amt.toLocaleString('en-IN')} प्राप्त हो गए हैं।`;
-    }
-    if (lang === 'english') {
-      return `Added "${custName}" as a new customer and recorded ₹${amt.toLocaleString('en-IN')} payment received.`;
-    }
-    return `"${custName}" ko naya customer add kar diya aur unse ₹${amt.toLocaleString('en-IN')} payment receive ho gayi hai.`;
-  }
-
-  if (createCustRes && createCustRes.success && results.length === 1) {
-    const custName = createCustRes.customer?.name || 'Customer';
-    if (createCustRes.existed) {
-      if (lang === 'hindi') return `"${custName}" पहले से ही आपकी कस्टमर लिस्ट में मौजूद हैं।`;
-      if (lang === 'english') return `"${custName}" already exists in your customer list.`;
-      return `"${custName}" pehle se customer list mein hain.`;
-    }
-    if (lang === 'hindi') return `नया ग्राहक "${custName}" जोड़ दिया गया है।`;
-    if (lang === 'english') return `Added "${custName}" as a new customer.`;
-    return `"${custName}" ko naya customer add kar diya hai.`;
-  }
-
-  // 4. ADD_CUSTOMER_DEBT (Udhar given)
-  if (addDebtRes && addDebtRes.success) {
-    const custName = addDebtRes.customer?.name || targetCustomer?.name || 'Customer';
-    const amt = addDebtRes.transaction?.amount ?? 0;
-    const finalBal = addDebtRes.newBal ?? (targetCustomer?.balance ?? 0);
-
-    if (lang === 'hindi') {
-      return `${custName} के खाते में ₹${amt.toLocaleString('en-IN')} उधार लिख दिए हैं। अब उनका कुल बकाया ₹${finalBal.toLocaleString('en-IN')} है।`;
-    }
-    if (lang === 'english') {
-      return `Recorded ₹${amt.toLocaleString('en-IN')} credit for ${custName}. Total balance is now ₹${finalBal.toLocaleString('en-IN')}.`;
-    }
-    return `${custName} ke account mein ₹${amt.toLocaleString('en-IN')} udhar likh diye hain. Ab unka total balance ₹${finalBal.toLocaleString('en-IN')} hai.`;
-  }
-
-  // 5. RECORD_PAYMENT (Payment received / Jama / Minus from khata)
-  if (recordPayRes && recordPayRes.success) {
-    const custName = recordPayRes.customer?.name || targetCustomer?.name || 'Customer';
-    const amt = recordPayRes.transaction?.amount ?? 0;
-    const finalBal = recordPayRes.newBal ?? (targetCustomer?.balance ?? 0);
-    const isSettled = finalBal <= 0;
-
-    if (lang === 'hindi') {
-      return `${custName} से ₹${amt.toLocaleString('en-IN')} प्राप्त हो गए। अब उनके खाते में ₹${finalBal.toLocaleString('en-IN')} बाकी हैं।${isSettled ? ' खाता चुकता हो गया है।' : ''}`;
-    }
-    if (lang === 'english') {
-      return `Received ₹${amt.toLocaleString('en-IN')} from ${custName}. Outstanding balance is now ₹${finalBal.toLocaleString('en-IN')}.${isSettled ? ' Account is fully settled.' : ''}`;
-    }
-    return `${custName} se ₹${amt.toLocaleString('en-IN')} receive ho gaye. Ab unke khate mein ₹${finalBal.toLocaleString('en-IN')} baaki hain.${isSettled ? ' Khata settled ho gaya hai.' : ''}`;
-  }
-
-  // 6. GET_CUSTOMER_BALANCE
-  const balRes = results.find(r => r.action === 'GET_CUSTOMER_BALANCE');
+  // 4. GET_LEDGER / GET_CUSTOMER_BALANCE
   if (balRes && balRes.success) {
     const custName = balRes.customer?.name || targetCustomer?.name || 'Customer';
     const bal = balRes.balance ?? targetCustomer?.balance ?? 0;
 
     if (bal > 0) {
-      if (lang === 'hindi') return `${custName} का ₹${bal.toLocaleString('en-IN')} बकाया है।`;
-      if (lang === 'english') return `${custName}'s outstanding balance is ₹${bal.toLocaleString('en-IN')}.`;
-      return `${custName} ka ₹${bal.toLocaleString('en-IN')} baaki hai.`;
+      if (lang === 'hindi') return `${custName} से ₹${bal.toLocaleString('en-IN')} लेने हैं (बकाया)।`;
+      return `${custName}'s outstanding receivable balance is ₹${bal.toLocaleString('en-IN')}.`;
     } else if (bal < 0) {
       if (lang === 'hindi') return `${custName} का ₹${Math.abs(bal).toLocaleString('en-IN')} एडवांस जमा है।`;
-      if (lang === 'english') return `${custName} has an advance deposit of ₹${Math.abs(bal).toLocaleString('en-IN')}.`;
-      return `${custName} ka ₹${Math.abs(bal).toLocaleString('en-IN')} advance deposit hai.`;
+      return `${custName} has an advance balance of ₹${Math.abs(bal).toLocaleString('en-IN')}.`;
     } else {
       if (lang === 'hindi') return `${custName} का खाता बिल्कुल चुकता है, कोई बकाया नहीं है।`;
-      if (lang === 'english') return `${custName}'s account is fully settled with zero dues.`;
-      return `${custName} ka account fully settled hai, zero dues.`;
+      return `${custName}'s account is fully settled with zero dues.`;
     }
   }
 
-  // 7. GET_ACCOUNT_SUMMARY
-  const summaryRes = results.find(r => r.action === 'GET_ACCOUNT_SUMMARY');
+  // 5. GET_TOTAL_RECEIVABLE / GET_ACCOUNT_SUMMARY
+  const summaryRes = results.find(r => r.action === 'GET_ACCOUNT_SUMMARY' || r.action === 'GET_TOTAL_RECEIVABLE');
   if (summaryRes && summaryRes.success) {
     const total = summaryRes.totalReceivables ?? 0;
-    if (lang === 'hindi') return `मार्केट में कुल बकाया ₹${total.toLocaleString('en-IN')} लेना है।`;
-    if (lang === 'english') return `Total market receivables across all customers are ₹${total.toLocaleString('en-IN')}.`;
-    return `Market me total ₹${total.toLocaleString('en-IN')} baaki lena hai.`;
+    if (lang === 'hindi') return `मार्केट से कुल ₹${total.toLocaleString('en-IN')} लेने हैं।`;
+    return `Total receivables across all customers are ₹${total.toLocaleString('en-IN')}.`;
   }
 
-  // 8. GET_CUSTOMER_HISTORY
-  const histRes = results.find(r => r.action === 'GET_CUSTOMER_HISTORY');
+  // 6. GET_TOTAL_PAYABLE
+  const payableRes = results.find(r => r.action === 'GET_TOTAL_PAYABLE');
+  if (payableRes && payableRes.success) {
+    const totalPayable = payableRes.totalPayables ?? 0;
+    if (lang === 'hindi') return `कुल देनदारी ₹${totalPayable.toLocaleString('en-IN')} है।`;
+    return `Total payable balance is ₹${totalPayable.toLocaleString('en-IN')}.`;
+  }
+
+  // 7. GET_TRANSACTIONS / GET_CUSTOMER_HISTORY
+  const histRes = results.find(r => r.action === 'GET_CUSTOMER_HISTORY' || r.action === 'GET_TRANSACTIONS');
   if (histRes && histRes.success) {
-    const custName = histRes.customer?.name || targetCustomer?.name || 'Customer';
+    const custName = histRes.customer?.name || targetCustomer?.name;
     const latest = histRes.latest;
     if (latest) {
-      const typeStr = latest.type === 'in' ? (lang === 'hindi' ? 'जमा' : 'payment') : (lang === 'hindi' ? 'उधार' : 'credit');
-      if (lang === 'hindi') return `${custName} का पिछला लेनदेन ₹${latest.amount.toLocaleString('en-IN')} (${typeStr}, ${latest.paymentMode}) का था।`;
-      if (lang === 'english') return `Last transaction for ${custName} was ₹${latest.amount.toLocaleString('en-IN')} (${typeStr} via ${latest.paymentMode}).`;
-      return `${custName} ki last transaction ₹${latest.amount.toLocaleString('en-IN')} (${typeStr}, ${latest.paymentMode}) ki thi.`;
+      const typeStr = latest.type === 'in' ? (lang === 'hindi' ? 'प्राप्त' : 'received') : (lang === 'hindi' ? 'उधार/भुगतान' : 'given');
+      if (lang === 'hindi') return `${custName || latest.partyName} का पिछला लेनदेन ₹${latest.amount.toLocaleString('en-IN')} (${typeStr}) का था।`;
+      return `Last transaction for ${custName || latest.partyName} was ₹${latest.amount.toLocaleString('en-IN')} (${typeStr}).`;
     } else {
-      if (lang === 'hindi') return `${custName} के लिए कोई पिछला लेनदेन नहीं मिला।`;
-      if (lang === 'english') return `No previous transactions found for ${custName}.`;
-      return `${custName} ke liye koi transaction nahi mila.`;
+      if (lang === 'hindi') return `${custName || 'ग्राहक'} के लिए कोई पिछला लेनदेन नहीं मिला।`;
+      return `No previous transactions found${custName ? ` for ${custName}` : ''}.`;
     }
   }
 
-  // Fallback
-  if (lang === 'hindi') return 'समझ गया, एक्शन पूरा कर दिया गया है।';
-  if (lang === 'english') return 'Understood, action completed.';
-  return 'Samajh gaya, action update kar diya.';
+  if (lang === 'hindi') return 'समझ गया, कार्य पूरा कर दिया गया है।';
+  return 'Understood, action completed.';
 }
 
-// Multimodal Voice Audio-to-Text Transcription via Gemini 3.8 Flash
+// Multimodal Voice Audio-to-Text Transcription via Gemini
 app.post('/api/voice/transcribe', async (req, res) => {
   try {
     const { audioData, mimeType, language } = req.body;
@@ -730,7 +965,7 @@ app.post('/api/voice/transcribe', async (req, res) => {
       ? 'Transcribe in English.'
       : 'Transcribe verbatim in the language spoken (Hindi, Hinglish, or English).';
 
-    const candidateModels = ['gemini-3.8-flash', 'gemini-2.5-flash'];
+    const candidateModels = ['gemini-3-flash-preview', 'gemini-2.5-flash'];
     let transcribedText = '';
 
     for (const model of candidateModels) {
@@ -854,6 +1089,51 @@ app.post('/api/voice/tts', async (req, res) => {
   }
 });
 
+// Authoritative Human Confirmation Endpoint (Executes DB Mutation ONLY after user confirms)
+app.post('/api/voice/confirm', (req, res) => {
+  try {
+    const { confirmation, context } = req.body;
+    if (!confirmation || !confirmation.intent) {
+      return res.status(400).json({ error: 'Valid confirmation payload is required' });
+    }
+
+    const {
+      reply,
+      executionResults,
+      toolCalls,
+      activeCustomerTarget,
+      latestTransactionCreated,
+    } = executeConfirmedMutation(confirmation as PendingConfirmation, context);
+
+    return res.json({
+      success: true,
+      reply,
+      executionResults,
+      updatedCustomer: activeCustomerTarget,
+      newTransaction: latestTransactionCreated,
+      toolCall: toolCalls[0],
+      toolCalls,
+      updatedContext: {
+        activeCustomer: activeCustomerTarget
+          ? {
+              id: activeCustomerTarget.id,
+              name: activeCustomerTarget.name,
+              phone: activeCustomerTarget.phone,
+              balance: activeCustomerTarget.balance,
+            }
+          : context?.activeCustomer,
+        pendingConfirmation: undefined,
+        pendingClarification: undefined,
+        lastAction: confirmation.intent,
+        detectedLanguage: confirmation.lang || 'hindi',
+      },
+    });
+  } catch (err: any) {
+    console.error('[VoiceConfirm] Error:', err);
+    return res.status(500).json({ error: err.message || 'Confirmation execution failed' });
+  }
+});
+
 app.post('/api/voice/chat', async (req, res) => {
   const { message, context, userLanguage } = req.body;
   const rawMessage = String(message || '').trim();
@@ -865,48 +1145,199 @@ app.post('/api/voice/chat', async (req, res) => {
     });
   }
 
+  const autoDetectedLang = detectLanguage(rawMessage);
+
+  // 0. If there is a pendingConfirmation in context and the user spoke a direct confirmation or cancellation
+  if (context?.pendingConfirmation) {
+    const pending: PendingConfirmation = context.pendingConfirmation;
+    if (isConfirmationUtterance(rawMessage)) {
+      const {
+        reply,
+        executionResults,
+        toolCalls,
+        activeCustomerTarget,
+        latestTransactionCreated,
+      } = executeConfirmedMutation(pending, context);
+
+      return res.json({
+        reply,
+        requiresConfirmation: false,
+        executionResults,
+        updatedCustomer: activeCustomerTarget,
+        newTransaction: latestTransactionCreated,
+        toolCall: toolCalls[0],
+        toolCalls,
+        updatedContext: {
+          activeCustomer: activeCustomerTarget
+            ? {
+                id: activeCustomerTarget.id,
+                name: activeCustomerTarget.name,
+                phone: activeCustomerTarget.phone,
+                balance: activeCustomerTarget.balance,
+              }
+            : context?.activeCustomer,
+          pendingConfirmation: undefined,
+          pendingClarification: undefined,
+          lastAction: pending.intent,
+          detectedLanguage: pending.lang || autoDetectedLang,
+        },
+      });
+    }
+
+    if (isCancellationUtterance(rawMessage)) {
+      const isHindi = (pending.lang || autoDetectedLang) !== 'english';
+      const cancelReply = isHindi
+        ? 'ठीक है, यह एंट्री रद्द (Cancel) कर दी गई है। कोई बदलाव सेव नहीं किया गया।'
+        : 'Cancelled. No changes were saved to the ledger.';
+      return res.json({
+        reply: cancelReply,
+        requiresConfirmation: false,
+        executionResults: [],
+        toolCalls: [],
+        updatedContext: {
+          ...context,
+          pendingConfirmation: undefined,
+          pendingClarification: undefined,
+          detectedLanguage: pending.lang || autoDetectedLang,
+        },
+      });
+    }
+  }
+
   // 1. Snapshot database for semantic action planner
   const totalReceivables = customers.filter(c => c.balance > 0).reduce((s, c) => s + c.balance, 0);
+  const totalPayables = customers.filter(c => c.balance < 0).reduce((s, c) => s + Math.abs(c.balance), 0);
   const dbSnapshot: DatabaseSnapshot = {
     customers: customers.map(c => ({ id: c.id, name: c.name, balance: c.balance, phone: c.phone })),
     products: products.map(p => ({ id: p.id, name: p.name, stockQty: p.stockQty, sellPrice: p.sellPrice })),
     transactions: transactions.slice(0, 15).map(t => ({ id: t.id, partyName: t.partyName, amount: t.amount, type: t.type, date: t.date })),
     totalReceivables,
+    totalPayables,
   };
 
   // 2. Generate Semantic Action Plan & Auto-Detect Language (Hindi vs English)
-  const autoDetectedLang = detectLanguage(rawMessage);
   const plan = await planner.plan(rawMessage, context || { recentTurns: [] }, dbSnapshot);
-  const userLang: 'hindi' | 'hinglish' | 'english' = autoDetectedLang === 'english' && plan.detectedLanguage === 'english' ? 'english' : (autoDetectedLang === 'hindi' ? 'hindi' : (plan.detectedLanguage === 'english' ? 'english' : 'hindi'));
+  const userLang: 'hindi' | 'hinglish' | 'english' =
+    autoDetectedLang === 'english' && plan.detectedLanguage === 'english'
+      ? 'english'
+      : autoDetectedLang === 'hindi'
+      ? 'hindi'
+      : plan.detectedLanguage === 'english'
+      ? 'english'
+      : 'hindi';
 
-  console.log(`[SemanticEngine] Utterance: "${rawMessage}" => Intent: [${plan.primaryIntent}], Actions: ${plan.actions.length}, Language: [${userLang}]`);
+  const interp = plan.structuredInterpretation;
+  console.log(
+    `[SemanticEngine] Utterance: "${rawMessage}" => Intent: [${plan.primaryIntent}], Person: [${interp?.person_name ?? 'none'}], Amount: [${interp?.amount ?? 'none'}], RequiresConfirmation: [${plan.requiresConfirmation}], Language: [${userLang}]`
+  );
 
   // 3. Check for genuine missing information, ambiguity, or direct clarification
-  if (plan.clarificationQuestion && (plan.actions.length === 0 || plan.missingInformation.length > 0 || plan.ambiguities.length > 0)) {
+  if (
+    plan.clarificationQuestion &&
+    (plan.actions.length === 0 || plan.missingInformation.length > 0 || plan.ambiguities.length > 0)
+  ) {
+    const pendingClarification =
+      plan.missingInformation.length > 0
+        ? {
+            personName: interp?.person_name || plan.entities?.customerName || null,
+            amount: interp?.amount || plan.entities?.amount || null,
+            intent: (interp?.intent !== 'UNKNOWN' ? interp?.intent : null) as StrictVoiceIntent | null,
+          }
+        : undefined;
+
     return res.json({
       reply: plan.clarificationQuestion,
       plan,
+      structuredInterpretation: interp,
+      requiresConfirmation: false,
       executionResults: [],
       toolCalls: [],
+      updatedContext: {
+        ...context,
+        pendingClarification,
+        detectedLanguage: userLang,
+      },
     });
   }
 
-  // 4. Authoritative Database Execution Engine
-  // Chains actions with real dependency handling
+  // 4. CRITICAL ARCHITECTURE RULE:
+  // If the intent is MUTATING (ADD_RECEIVABLE, ADD_PAYMENT_GIVEN, RECORD_PAYMENT_RECEIVED, CREATE_CUSTOMER, UPDATE_TRANSACTION, DELETE_TRANSACTION),
+  // DO NOT mutate the database yet! Return a PendingConfirmation for human confirmation.
+  const primaryIntentStr = String(plan.primaryIntent || interp?.intent || '');
+  if (MUTATING_VOICE_INTENTS.has(primaryIntentStr) || plan.requiresConfirmation) {
+    const strictIntent = (interp?.intent || primaryIntentStr) as StrictVoiceIntent;
+    const personName =
+      interp?.person_name ||
+      plan.entities?.customerName ||
+      context?.activeCustomer?.name ||
+      'Customer';
+    const amount = interp?.amount ?? plan.entities?.amount ?? null;
+    const existingCust = customers.find(
+      c =>
+        c.name.toLowerCase() === personName.toLowerCase() ||
+        c.name.toLowerCase().startsWith(personName.toLowerCase() + ' ')
+    );
+    const existingBal = existingCust ? existingCust.balance : 0;
+    const delta = strictIntent === 'RECORD_PAYMENT_RECEIVED' ? -(amount || 0) : (amount || 0);
+    const newBalPreview = amount !== null ? existingBal + delta : existingBal;
+
+    const pendingConfirmation: PendingConfirmation = {
+      id: `confirm-${Date.now()}`,
+      action: 'execute_intent',
+      intent: strictIntent,
+      secondaryIntent: interp?.secondary_intent || (!existingCust && strictIntent !== 'CREATE_CUSTOMER' ? 'CREATE_CUSTOMER' : null),
+      personName: existingCust ? existingCust.name : personName,
+      customerId: existingCust?.id,
+      amount,
+      currency: 'INR',
+      description: interp?.description || plan.entities?.note || null,
+      paymentMode: (plan.entities?.paymentMethod as any) || 'Cash',
+      isAdditionToExisting: Boolean(interp?.is_addition_to_existing),
+      existingBalance: existingBal,
+      newBalancePreview: newBalPreview,
+      customerExists: Boolean(existingCust),
+      payload: { plan, structuredInterpretation: interp },
+      summaryTitle: getIntentSummaryTitle(strictIntent, userLang),
+      message: '',
+      lang: userLang,
+    };
+
+    const preSaveReply = buildPreSaveConfirmationPrompt(pendingConfirmation, userLang);
+    pendingConfirmation.message = preSaveReply;
+
+    return res.json({
+      reply: preSaveReply,
+      plan,
+      structuredInterpretation: interp,
+      requiresConfirmation: true,
+      pendingConfirmation,
+      executionResults: [],
+      toolCalls: [],
+      updatedContext: {
+        ...context,
+        pendingConfirmation,
+        pendingClarification: undefined,
+        detectedLanguage: userLang,
+      },
+    });
+  }
+
+  // 5. Read-Only & Navigation Execution Engine (Executes immediately without confirmation)
   const executionResults: any[] = [];
   const toolCalls: any[] = [];
-  let newlyCreatedCustomer: any = null;
   let activeCustomerTarget: any = null;
-  let latestTransactionCreated: any = null;
 
   for (const item of plan.actions) {
     const act = item.action;
     const params = item.parameters || {};
 
     try {
-      // 4a. NAVIGATE
       if (act === 'NAVIGATE') {
         const dest = params.destination || params.target || 'home';
+        if (params.customerName) {
+          const found = customers.find(c => c.name.toLowerCase().includes(params.customerName.toLowerCase().trim()));
+          if (found) activeCustomerTarget = found;
+        }
         toolCalls.push({
           name: 'navigate',
           args: {
@@ -915,151 +1346,7 @@ app.post('/api/voice/chat', async (req, res) => {
           },
         });
         executionResults.push({ action: act, success: true, destination: dest });
-      }
-
-      // 4b. CREATE_CUSTOMER
-      else if (act === 'CREATE_CUSTOMER') {
-        const rawName = params.customerName || 'New Customer';
-        const cleanName = cleanExtractedCustomerName(rawName) || rawName.trim();
-        
-        // Safety: Never create UI concepts or empty as customers
-        if (!cleanName || FORBIDDEN_CUSTOMER_PHRASES.has(cleanName.toLowerCase()) || cleanName.length < 2) {
-          executionResults.push({ action: act, success: false, error: 'Invalid customer name' });
-          continue;
-        }
-
-        let existing = customers.find(c => c.name.toLowerCase() === cleanName.toLowerCase());
-        if (!existing) {
-          const newCust = {
-            id: `cust-${Date.now()}`,
-            name: cleanName,
-            phone: params.phone || '', // NEVER invent fake phone numbers
-            address: params.address || '',
-            balance: Number(params.openingBalance) || 0,
-            lastTransactionDate: new Date().toISOString().slice(0, 10),
-            status: 'settled',
-            createdAt: new Date().toISOString().slice(0, 10),
-          };
-          customers.unshift(newCust);
-          newlyCreatedCustomer = newCust;
-          activeCustomerTarget = newCust;
-          toolCalls.push({
-            name: 'add_customer',
-            args: { name: newCust.name, phone: newCust.phone, customer: newCust },
-          });
-          executionResults.push({ action: act, success: true, customer: newCust });
-        } else {
-          newlyCreatedCustomer = existing;
-          activeCustomerTarget = existing;
-          executionResults.push({ action: act, success: true, customer: existing, existed: true });
-        }
-      }
-
-      // 4c. ADD_CUSTOMER_DEBT (Udhar / Credit Given)
-      else if (act === 'ADD_CUSTOMER_DEBT') {
-        const amt = Number(params.amount) || 0;
-        let cust: any = null;
-
-        if (params.usePriorActionResultForCustomerId && newlyCreatedCustomer) {
-          cust = newlyCreatedCustomer;
-        } else if (params.customerName) {
-          cust = customers.find(c => c.name.toLowerCase() === params.customerName.toLowerCase().trim()) ||
-                 customers.find(c => c.name.toLowerCase().includes(params.customerName.toLowerCase().trim()));
-        } else if (context?.activeCustomer?.id) {
-          cust = customers.find(c => c.id === context.activeCustomer.id);
-        }
-
-        if (!cust) {
-          executionResults.push({ action: act, success: false, error: 'Customer not found' });
-          continue;
-        }
-
-        const prevBal = cust.balance;
-        cust.balance += amt;
-        cust.status = cust.balance > 0 ? 'due' : (cust.balance < 0 ? 'advance' : 'settled');
-        cust.lastTransactionDate = new Date().toISOString().slice(0, 10);
-
-        const newTx = {
-          id: `tx-${Date.now()}`,
-          date: new Date().toLocaleString('en-IN', { hour12: false }),
-          type: 'out',
-          category: 'Customer Credit',
-          description: params.description || `Credit given to ${cust.name}`,
-          partyName: cust.name,
-          paymentMode: 'Cash',
-          amount: amt,
-          customerId: cust.id,
-        };
-        transactions.unshift(newTx);
-        activeCustomerTarget = cust;
-        latestTransactionCreated = newTx;
-
-        toolCalls.push({
-          name: 'add_transaction',
-          args: {
-            customer_name: cust.name,
-            amount: amt,
-            transaction_type: 'debit',
-            customer: cust,
-            transaction: newTx,
-          },
-        });
-        executionResults.push({ action: act, success: true, customer: cust, transaction: newTx, prevBal, newBal: cust.balance });
-      }
-
-      // 4d. RECORD_PAYMENT (Customer pays merchant -> Jama / Minus from khata)
-      else if (act === 'RECORD_PAYMENT') {
-        const amt = Number(params.amount) || 0;
-        let cust: any = null;
-
-        if (params.customerName) {
-          cust = customers.find(c => c.name.toLowerCase() === params.customerName.toLowerCase().trim()) ||
-                 customers.find(c => c.name.toLowerCase().includes(params.customerName.toLowerCase().trim()));
-        } else if (context?.activeCustomer?.id) {
-          cust = customers.find(c => c.id === context.activeCustomer.id);
-        }
-
-        if (!cust) {
-          executionResults.push({ action: act, success: false, error: 'Customer not found' });
-          continue;
-        }
-
-        const prevBal = cust.balance;
-        cust.balance -= amt;
-        cust.status = cust.balance > 0 ? 'due' : (cust.balance < 0 ? 'advance' : 'settled');
-        cust.lastTransactionDate = new Date().toISOString().slice(0, 10);
-
-        const newTx = {
-          id: `tx-${Date.now()}`,
-          date: new Date().toLocaleString('en-IN', { hour12: false }),
-          type: 'in',
-          category: 'Customer Payment',
-          description: params.description || `Payment from ${cust.name}`,
-          partyName: cust.name,
-          paymentMode: params.paymentMethod || 'Cash',
-          amount: amt,
-          customerId: cust.id,
-        };
-        transactions.unshift(newTx);
-        activeCustomerTarget = cust;
-        latestTransactionCreated = newTx;
-
-        toolCalls.push({
-          name: 'add_transaction',
-          args: {
-            customer_name: cust.name,
-            amount: amt,
-            transaction_type: 'credit',
-            payment_mode: newTx.paymentMode,
-            customer: cust,
-            transaction: newTx,
-          },
-        });
-        executionResults.push({ action: act, success: true, customer: cust, transaction: newTx, prevBal, newBal: cust.balance });
-      }
-
-      // 4e. GET_CUSTOMER_BALANCE
-      else if (act === 'GET_CUSTOMER_BALANCE') {
+      } else if (act === 'GET_CUSTOMER_BALANCE' || act === 'GET_LEDGER') {
         let cust: any = null;
         if (params.customerName) {
           cust = customers.find(c => c.name.toLowerCase().includes(params.customerName.toLowerCase().trim()));
@@ -1073,11 +1360,20 @@ app.post('/api/voice/chat', async (req, res) => {
             args: { customer_name: cust.name, balance: cust.balance },
           });
           executionResults.push({ action: act, success: true, customer: cust, balance: cust.balance });
+        } else if (params.customerName) {
+          const notFoundMsg = userLang === 'english'
+            ? `Could not find any customer named "${params.customerName}".`
+            : `"${params.customerName}" नाम का कोई ग्राहक खाते में नहीं मिला।`;
+          return res.json({
+            reply: notFoundMsg,
+            plan,
+            structuredInterpretation: interp,
+            requiresConfirmation: false,
+            executionResults: [],
+            toolCalls: [],
+          });
         }
-      }
-
-      // 4f. GET_CUSTOMER_HISTORY
-      else if (act === 'GET_CUSTOMER_HISTORY') {
+      } else if (act === 'GET_CUSTOMER_HISTORY' || act === 'GET_TRANSACTIONS') {
         let cust: any = null;
         if (params.customerName) {
           cust = customers.find(c => c.name.toLowerCase().includes(params.customerName.toLowerCase().trim()));
@@ -1085,24 +1381,43 @@ app.post('/api/voice/chat', async (req, res) => {
           cust = customers.find(c => c.id === context.activeCustomer.id);
         }
         if (cust) {
+          activeCustomerTarget = cust;
           const custTxs = transactions.filter((t: any) => t.customerId === cust.id || t.partyName?.toLowerCase() === cust.name.toLowerCase());
           toolCalls.push({
             name: 'get_transactions',
-            args: { customer_name: cust.name, transactions: custTxs.slice(0, 3) },
+            args: { customer_name: cust.name, transactions: custTxs.slice(0, 5) },
           });
           executionResults.push({ action: act, success: true, customer: cust, count: custTxs.length, latest: custTxs[0] });
+        } else {
+          toolCalls.push({
+            name: 'get_transactions',
+            args: { transactions: transactions.slice(0, 5) },
+          });
+          executionResults.push({ action: act, success: true, count: transactions.length, latest: transactions[0] });
         }
-      }
-
-      // 4g. GET_ACCOUNT_SUMMARY
-      else if (act === 'GET_ACCOUNT_SUMMARY') {
+      } else if (act === 'GET_ACCOUNT_SUMMARY' || act === 'GET_TOTAL_RECEIVABLE') {
         const total = customers.filter(c => c.balance > 0).reduce((s, c) => s + c.balance, 0);
         toolCalls.push({ name: 'get_account_balance', args: { totalReceivables: total } });
         executionResults.push({ action: act, success: true, totalReceivables: total });
-      }
-
-      // 4h. END_CONVERSATION
-      else if (act === 'END_CONVERSATION') {
+      } else if (act === 'GET_TOTAL_PAYABLE') {
+        const totalPay = customers.filter(c => c.balance < 0).reduce((s, c) => s + Math.abs(c.balance), 0);
+        executionResults.push({ action: act, success: true, totalPayables: totalPay });
+      } else if (act === 'CANCEL_LAST_ACTION') {
+        if (transactions.length > 0) {
+          const undoneTx = transactions.shift()!;
+          const cust = customers.find(c => c.id === undoneTx.customerId || c.name.toLowerCase() === undoneTx.partyName?.toLowerCase());
+          if (cust) {
+            if (undoneTx.type === 'out') cust.balance -= undoneTx.amount;
+            else cust.balance += undoneTx.amount;
+            cust.status = cust.balance > 0 ? 'due' : (cust.balance < 0 ? 'advance' : 'settled');
+            activeCustomerTarget = cust;
+          }
+          toolCalls.push({ name: 'delete_transaction', args: { id: undoneTx.id, customer: cust } });
+          executionResults.push({ action: act, success: true, undoneTx });
+        } else {
+          executionResults.push({ action: act, success: false });
+        }
+      } else if (act === 'END_CONVERSATION') {
         toolCalls.push({ name: 'end_conversation', args: {} });
         executionResults.push({ action: act, success: true });
       }
@@ -1112,16 +1427,15 @@ app.post('/api/voice/chat', async (req, res) => {
     }
   }
 
-  // 5. Generate Natural, Truthful Spoken Response in user's detected language
   const reply = generateTruthfulResponse(plan, executionResults, userLang, activeCustomerTarget);
 
-  // 6. Return Structured Response to frontend
   return res.json({
     reply,
     plan,
+    structuredInterpretation: interp,
+    requiresConfirmation: false,
     executionResults,
     updatedCustomer: activeCustomerTarget,
-    newTransaction: latestTransactionCreated,
     toolCall: toolCalls[0],
     toolCalls,
     updatedContext: {
@@ -1131,6 +1445,7 @@ app.post('/api/voice/chat', async (req, res) => {
         phone: activeCustomerTarget.phone,
         balance: activeCustomerTarget.balance,
       } : context?.activeCustomer,
+      pendingClarification: undefined,
       lastAction: plan.primaryIntent,
       detectedLanguage: userLang,
     },

@@ -8,11 +8,64 @@ export type VoiceState =
   | 'ENDING'
   | 'ERROR';
 
+export type StrictVoiceIntent =
+  | 'ADD_RECEIVABLE'
+  | 'ADD_PAYMENT_GIVEN'
+  | 'RECORD_PAYMENT_RECEIVED'
+  | 'GET_LEDGER'
+  | 'GET_TOTAL_RECEIVABLE'
+  | 'GET_TOTAL_PAYABLE'
+  | 'GET_TRANSACTIONS'
+  | 'CREATE_CUSTOMER'
+  | 'UPDATE_TRANSACTION'
+  | 'DELETE_TRANSACTION'
+  | 'CANCEL_LAST_ACTION'
+  | 'NAVIGATE'
+  | 'END_CONVERSATION'
+  | 'UNKNOWN';
+
+export interface StructuredVoiceInterpretation {
+  intent: StrictVoiceIntent;
+  secondary_intent?: StrictVoiceIntent | null;
+  person_name: string | null;
+  amount: number | null;
+  currency: string;
+  description: string | null;
+  date: string | null;
+  confidence: number;
+  requires_confirmation: boolean;
+  is_addition_to_existing?: boolean;
+  existing_balance?: number | null;
+  new_balance_preview?: number | null;
+  clarification_question?: string | null;
+  detected_language?: 'hindi' | 'hinglish' | 'english';
+  navigation_target?: string | null;
+}
+
 export interface PendingConfirmation {
-  action: 'delete_transaction' | 'delete_customer' | 'delete_reminder' | 'custom';
+  id: string;
+  action:
+    | 'execute_intent'
+    | 'delete_transaction'
+    | 'delete_customer'
+    | 'delete_reminder'
+    | 'custom';
+  intent: StrictVoiceIntent;
+  secondaryIntent?: StrictVoiceIntent | null;
+  personName: string;
+  customerId?: string;
+  amount: number | null;
+  currency: string;
+  description?: string | null;
+  paymentMode?: 'Cash' | 'UPI' | 'Bank' | 'Credit';
+  isAdditionToExisting?: boolean;
+  existingBalance?: number;
+  newBalancePreview?: number;
+  customerExists?: boolean;
   payload: any;
   message: string;
-  description: string;
+  summaryTitle: string;
+  lang: 'hindi' | 'hinglish' | 'english';
 }
 
 export interface PendingSlotFilling {
@@ -52,6 +105,11 @@ export interface ConversationContext {
   pendingAction?: any;
   pendingConfirmation?: PendingConfirmation;
   pendingSlotFilling?: PendingSlotFilling;
+  pendingClarification?: {
+    personName?: string | null;
+    amount?: number | null;
+    intent?: StrictVoiceIntent | null;
+  };
   pendingField?: string | null;
   currentPage?: string;
   detectedLanguage?: 'hindi' | 'hinglish' | 'english';
@@ -86,13 +144,22 @@ export type PlannedActionType =
   | 'GET_CUSTOMER_BALANCE'
   | 'GET_CUSTOMER_HISTORY'
   | 'ADD_CUSTOMER_DEBT'
+  | 'ADD_RECEIVABLE'
+  | 'ADD_PAYMENT_GIVEN'
   | 'RECORD_PAYMENT'
+  | 'RECORD_PAYMENT_RECEIVED'
+  | 'GET_LEDGER'
+  | 'GET_TOTAL_RECEIVABLE'
+  | 'GET_TOTAL_PAYABLE'
+  | 'GET_TRANSACTIONS'
   | 'GET_ACCOUNT_SUMMARY'
   | 'CREATE_SALE'
   | 'MANAGE_STOCK'
   | 'ADD_REMINDER'
   | 'GET_REMINDERS'
+  | 'UPDATE_TRANSACTION'
   | 'DELETE_TRANSACTION'
+  | 'CANCEL_LAST_ACTION'
   | 'END_CONVERSATION'
   | 'ASK_CLARIFICATION';
 
@@ -104,8 +171,10 @@ export interface PlannedAction {
 
 export interface SemanticActionPlan {
   detectedLanguage: 'hindi' | 'hinglish' | 'english';
-  primaryIntent: string;
+  primaryIntent: StrictVoiceIntent | string;
   userGoalSummary: string;
+  structuredInterpretation?: StructuredVoiceInterpretation;
+  requiresConfirmation?: boolean;
   entities: {
     customerName?: string | null;
     amount?: number | null;
@@ -139,6 +208,9 @@ export interface ExecutionResult {
 export interface VoiceServerResponse {
   reply: string;
   plan?: SemanticActionPlan;
+  structuredInterpretation?: StructuredVoiceInterpretation;
+  requiresConfirmation?: boolean;
+  pendingConfirmation?: PendingConfirmation;
   executionResults?: ExecutionResult[];
   updatedCustomer?: any;
   newTransaction?: any;
