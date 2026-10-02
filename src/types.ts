@@ -57,7 +57,7 @@ export interface Transaction {
   id: string;
   date: string;
   type: 'in' | 'out'; // in = Money In / Income, out = Money Out / Outgoing
-  category: 'Sale' | 'Customer Payment' | 'Expense' | 'Supplier Payment' | 'Salary' | 'Purchase' | 'Refund' | 'Other';
+  category: 'Sale' | 'Customer Payment' | 'Customer Credit' | 'Expense' | 'Supplier Payment' | 'Salary' | 'Purchase' | 'Refund' | 'Other';
   description: string;
   partyName?: string;
   paymentMode: PaymentMethod;

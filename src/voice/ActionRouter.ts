@@ -219,15 +219,15 @@ export class ActionRouter {
     if (finalCustomer) {
       if (isCredit) {
         responseText = formatLocalizedResponse(lang, {
-          hindi: `${finalCustomer.name} का ₹${amount.toLocaleString('en-IN')} भुगतान प्राप्त हो गया है। पहले बकाया ₹${previousBalance.toLocaleString('en-IN')} था, अब नया बकाया ₹${newBalance.toLocaleString('en-IN')} है।${newBalance <= 0 ? ' खाता चुकता हो गया है।' : ''}`,
-          hinglish: `${finalCustomer.name} ka ₹${amount.toLocaleString('en-IN')} payment receive ho gaya hai. Pehle balance ₹${previousBalance.toLocaleString('en-IN')} tha, ab naya balance ₹${newBalance.toLocaleString('en-IN')} hai.${newBalance <= 0 ? ' Khata settled ho gaya hai.' : ''}`,
-          english: `Received ₹${amount.toLocaleString('en-IN')} payment from ${finalCustomer.name}. Previous balance was ₹${previousBalance.toLocaleString('en-IN')}, new balance is ₹${newBalance.toLocaleString('en-IN')}.${newBalance <= 0 ? ' Account is fully settled.' : ''}`,
+          hindi: `${finalCustomer.name} से ₹${amount.toLocaleString('en-IN')} प्राप्त हो गए। अब उनके खाते में ₹${newBalance.toLocaleString('en-IN')} बाकी हैं।${newBalance <= 0 ? ' खाता चुकता हो गया है।' : ''}`,
+          hinglish: `${finalCustomer.name} se ₹${amount.toLocaleString('en-IN')} receive ho gaye. Ab unke khate mein ₹${newBalance.toLocaleString('en-IN')} baaki hain.${newBalance <= 0 ? ' Khata settled ho gaya hai.' : ''}`,
+          english: `Received ₹${amount.toLocaleString('en-IN')} from ${finalCustomer.name}. Their outstanding balance is now ₹${newBalance.toLocaleString('en-IN')}.${newBalance <= 0 ? ' Account is fully settled.' : ''}`,
         });
       } else {
         responseText = formatLocalizedResponse(lang, {
-          hindi: `${finalCustomer.name} के खाते में ₹${amount.toLocaleString('en-IN')} उधार लिख दिए हैं। पहले बकाया ₹${previousBalance.toLocaleString('en-IN')} था, अब कुल बकाया ₹${newBalance.toLocaleString('en-IN')} है।`,
-          hinglish: `${finalCustomer.name} ke account mein ₹${amount.toLocaleString('en-IN')} udhar likh diye hain. Pehle balance ₹${previousBalance.toLocaleString('en-IN')} tha, ab total balance ₹${newBalance.toLocaleString('en-IN')} hai.`,
-          english: `Recorded ₹${amount.toLocaleString('en-IN')} credit for ${finalCustomer.name}. Previous balance was ₹${previousBalance.toLocaleString('en-IN')}, new total balance is ₹${newBalance.toLocaleString('en-IN')}.`,
+          hindi: `${finalCustomer.name} के खाते में ₹${amount.toLocaleString('en-IN')} उधार लिख दिए हैं। अब उनका कुल बकाया ₹${newBalance.toLocaleString('en-IN')} है।`,
+          hinglish: `${finalCustomer.name} ke account mein ₹${amount.toLocaleString('en-IN')} udhar likh diye hain. Ab unka total balance ₹${newBalance.toLocaleString('en-IN')} hai.`,
+          english: `Recorded ₹${amount.toLocaleString('en-IN')} credit for ${finalCustomer.name}. Total balance is now ₹${newBalance.toLocaleString('en-IN')}.`,
         });
       }
     } else {

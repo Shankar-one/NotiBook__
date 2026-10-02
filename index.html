@@ -3,6 +3,41 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // Suppress noisy third-party extension errors (e.g. MetaMask in sandboxed preview iframe)
+      (function() {
+        function isExtensionError(msg) {
+          if (!msg) return false;
+          var str = String(msg).toLowerCase();
+          return (
+            str.indexOf('metamask') !== -1 ||
+            str.indexOf('failed to connect to metamask') !== -1 ||
+            str.indexOf('chrome-extension://') !== -1 ||
+            str.indexOf('moz-extension://') !== -1 ||
+            str.indexOf('ethereum') !== -1 ||
+            str.indexOf('web3') !== -1
+          );
+        }
+
+        window.addEventListener('unhandledrejection', function(event) {
+          var reason = event.reason;
+          var msg = (reason && (reason.message || reason.stack || String(reason))) || '';
+          if (isExtensionError(msg)) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+          }
+        }, true);
+
+        window.addEventListener('error', function(event) {
+          var msg = (event.message || '') + ' ' + (event.filename || '');
+          if (isExtensionError(msg)) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            return true;
+          }
+        }, true);
+      })();
+    </script>
     <title>NotiBook - Smart Business Ledger & Khatabook</title>
     <meta name="description" content="Minimalist voice-enabled smart business ledger, billing invoice generator, customer khatabook, and inventory manager for modern merchants." />
     <meta property="og:title" content="NotiBook - Smart Business Ledger & Khatabook" />

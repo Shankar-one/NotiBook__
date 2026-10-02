@@ -59,7 +59,7 @@ export async function createCustomerApi(customer: Partial<Customer>): Promise<Cu
   const newCustomer: Customer = {
     id: `cust-${Date.now()}`,
     name: sanitizedName,
-    phone: customer.phone || '+91 98000 00000',
+    phone: customer.phone || '',
     address: customer.address || '',
     balance: customer.balance || 0,
     lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),

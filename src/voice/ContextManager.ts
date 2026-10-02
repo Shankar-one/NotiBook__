@@ -95,7 +95,7 @@ export class ContextManager {
     const text = input.toLowerCase();
 
     // 1. Check for pronouns referring to active customer
-    const pronounRegex = /\b(usmein|usme|uski|uska|uske|usse|unka|unki|unke|unhe|unko|unse|isme|ismein|iska|iski|isse|woh|same\s+customer|same\s+one|that\s+customer|him|her|them)\b|उसमें|उसका|उसकी|उसके|उससे|उनका|उनकी|उनके|उनसे|इसमें|इसका|इसकी|इससे/i;
+    const pronounRegex = /\b(usne|usmein|usme|uski|uska|uske|usse|unhone|unka|unki|unke|unhe|unko|unse|isme|ismein|iska|iski|isse|woh|same\s+customer|same\s+one|that\s+customer|him|her|them)\b|उसने|उन्होंने|उसमें|उसका|उसकी|उसके|उससे|उनका|उनकी|उनके|उनसे|इसमें|इसका|इसकी|इससे/i;
     if (pronounRegex.test(text) && this.context.activeCustomer) {
       const active = knownCustomers.find((c) => c.id === this.context.activeCustomer?.id);
       if (active) {

@@ -132,11 +132,11 @@ app.post('/api/customers', (req, res) => {
   const newCust = {
     id: `cust-${Date.now()}`,
     name: name || 'New Customer',
-    phone: phone || '+91 98000 00000',
+    phone: phone || '', // Never invent fake phone numbers
     address: address || '',
-    balance: balance || 0,
+    balance: Number(balance) || 0,
     lastTransactionDate: new Date().toISOString().slice(0, 10),
-    status: (balance || 0) > 0 ? 'due' : 'settled',
+    status: (Number(balance) || 0) > 0 ? 'due' : (Number(balance) || 0) < 0 ? 'advance' : 'settled',
     createdAt: new Date().toISOString().slice(0, 10),
   };
   customers.unshift(newCust);
@@ -174,38 +174,34 @@ app.post('/api/transactions', (req, res) => {
     id: `tx-${Date.now()}`,
     date: new Date().toLocaleString('en-IN', { hour12: false }),
     type: isCredit ? 'in' : 'out',
-    category: category || (isCredit ? 'Customer Payment' : 'Expense'),
+    category: category || (isCredit ? 'Customer Payment' : 'Customer Credit'),
     description: description || `${isCredit ? 'Payment from' : 'Given to'} ${partyName || 'Customer'}`,
     partyName,
     paymentMode: paymentMode || 'Cash',
     amount: Number(amount) || 0,
+    customerId,
   };
   transactions.unshift(newTx);
 
-  // Update customer balance if applicable
-  if (partyName && partyName !== 'खाता' && partyName !== 'Customer') {
-    const cust = customers.find(c => c.name.toLowerCase() === partyName.toLowerCase());
-    if (cust) {
-      const delta = isCredit ? -newTx.amount : newTx.amount;
-      cust.balance += delta;
-      cust.lastTransactionDate = new Date().toISOString().slice(0, 10);
-    } else {
-      const delta = isCredit ? -newTx.amount : newTx.amount;
-      const newCust = {
-        id: `cust-${Date.now()}`,
-        name: partyName,
-        phone: '+91 98000 00000',
-        address: '',
-        balance: delta,
-        lastTransactionDate: new Date().toISOString().slice(0, 10),
-        status: delta > 0 ? 'due' : 'settled',
-        createdAt: new Date().toISOString().slice(0, 10),
-      };
-      customers.unshift(newCust);
-    }
+  let updatedCust = null;
+  // Resolve customer by customerId first, then by matching against existing customers
+  let cust = customerId ? customers.find(c => c.id === customerId) : null;
+  if (!cust && partyName && partyName !== 'खाता' && partyName !== 'Customer') {
+    const pName = partyName.trim().toLowerCase();
+    cust = customers.find(c => c.name.toLowerCase() === pName) ||
+           customers.find(c => c.name.toLowerCase().includes(pName) || pName.includes(c.name.toLowerCase().split(' ')[0]));
   }
 
-  res.json({ transaction: newTx });
+  if (cust) {
+    const delta = isCredit ? -newTx.amount : newTx.amount;
+    cust.balance += delta;
+    cust.status = cust.balance > 0 ? 'due' : cust.balance < 0 ? 'advance' : 'settled';
+    cust.lastTransactionDate = new Date().toISOString().slice(0, 10);
+    updatedCust = cust;
+  }
+  // NEVER CREATE A CUSTOMER AUTOMATICALLY FROM A TRANSACTION SENTENCE!
+
+  res.json({ transaction: newTx, customer: updatedCust });
 });
 
 app.put('/api/transactions/:id', (req, res) => {
@@ -542,374 +538,610 @@ app.get('/api/reports/summary', (req, res) => {
 });
 
 // --- GEMINI LIVE CONVERSATIONAL VOICE AGENT ENDPOINT ---
-app.post('/api/voice/chat', async (req, res) => {
-  const { message, context, activeCustomer, userLanguage } = req.body;
+const FORBIDDEN_CUSTOMER_PHRASES = new Set([
+  'account', 'khata', 'khate', 'customer', 'grahak', 'entry', 'balance', 'udhar', 'jama',
+  'paisa', 'paise', 'rupaye', 'rupees', 'rs', 'inr', 'batao', 'dikhao', 'kholo', 'karo', 'de do',
+  'minus', 'hisab', 'payment', 'today', 'kal', 'yesterday', 'bill', 'receipt',
+  'aa chuka', 'aa chuka hai', 'aa gaya', 'mil gaya', 'de diye', 'diye', 'minus karke',
+  'minus karke batao', 'minus karo', 'to khate', 'to khate mein', 'khate mein se', 'khate mein',
+  'account mein', 'account mein se', 'usme', 'usmein', 'unke', 'uska', 'iski', 'iske',
+  'pay kar di', 'payment kar di', 'receive hua', 'receive hue', 'karke batao', 'bata do',
+  'अकाउंट', 'खाता', 'खाते', 'कस्टमर', 'ग्राहक', 'एंट्री', 'बैलेंस', 'उधार', 'उधर', 'जमा',
+  'पैसा', 'पैसे', 'रुपये', 'रुपए', 'बताओ', 'दिखाओ', 'खोलो', 'करो', 'दे दो', 'माइनस',
+  'माइनस करके बताओ', 'माइनस करो', 'आ चुका है', 'आ गया', 'मिल गया', 'दे दिए', 'खाते में',
+  'खाते में से', 'कम करो', 'पेमेंट कर दी'
+]);
 
-  const activeLangInstruction = userLanguage === 'english'
-    ? 'CRITICAL: The user has selected English or is speaking in English. Your spoken and written responses (speech_response and reply) MUST be in natural, professional English.'
-    : (userLanguage === 'hindi'
-        ? 'CRITICAL: The user has selected Hindi or is speaking in Hindi. Your responses MUST be in natural Hindi in Devanagari script.'
-        : 'Match the language naturally (English -> English, Hindi -> Hindi, Hinglish -> Hinglish).');
+function normalizeCustomerName(name: string): string {
+  if (!name) return '';
+  return name.trim().toLowerCase()
+    .replace(/^(?:shri|shree|mr\.?|mrs\.?|ms\.?|customer|grahak|naya|new)\s+/i, '')
+    .replace(/\s+(?:ji|bhai|bhaiya|saheb|sahab|babu|sir|madam)$/i, '')
+    .replace(/\s+/g, ' ');
+}
 
-  const systemInstruction = `You are Jarvis, the intelligent conversational voice assistant for NotiBook (smart business ledger & Khatabook for Indian merchants).
+function cleanCustomerName(rawName: string): string {
+  if (!rawName) return '';
+  let text = rawName.trim();
+  text = text.replace(/^(?:अरे|भाई|सुनो|जार्विस|jarvis|hey\s+jarvis|please|zara|ek|naya|new)\s+/i, '');
+  text = text.replace(/(?:\s+(?:ka|ki|ke|ko|se|ne|pe|par|में|पे|पर|का|की|के|को|से|ने))+$/i, '');
+  text = text.replace(/^(?:se|ko|ne|ka|ki|ke|to|in|for)\s+/i, '');
+  text = text.replace(/\s+(?:ke\s+khate\s+mein\s+se|ke\s+khate\s+mein|to\s+khate\s+mein|khate\s+mein\s+se|khate\s+mein|account\s+mein|mein|me)$/i, '');
+  text = text.replace(/\s+(?:aa\s+chuka\s+hai|aa\s+chuka|aa\s+gaya|mil\s+gaya|de\s+diye|diye|minus\s+karke\s+batao|minus\s+karo)$/i, '');
+  text = text.replace(/\s+(?:के\s+खाते\s+में\s+से|के\s+खाते\s+में|खाते\s+में\s+से|खाते\s+में|अकाउंट\s+में|में)$/i, '');
+  text = text.replace(/\s+(?:आ\s+चुका\s+है|आ\s+गया|मिल\s+गया|दे\s+दिए|दिए|माइनस\s+करके\s+बताओ|माइनस\s+करो)$/i, '');
+  text = text.replace(/[0-9₹,\.]+/g, '').trim();
 
-${activeLangInstruction}
+  const lower = text.toLowerCase();
+  if (FORBIDDEN_CUSTOMER_PHRASES.has(lower) || lower.length < 2) return '';
+  const words = lower.split(/\s+/).filter(Boolean);
+  const nonFragmentWords = words.filter(w => !FORBIDDEN_CUSTOMER_PHRASES.has(w) && !['to', 'se', 'ko', 'ne', 'ka', 'ki', 'ke', 'hai', 'tha', 'mein'].includes(w));
+  if (nonFragmentWords.length === 0) return '';
+  return text.trim();
+}
 
-STRICT CONVERSATIONAL & LANGUAGE RULES (Follow strictly on every turn):
-1. English input → natural English response.
-2. Hindi input (Devanagari or Romanized) → natural Hindi response.
-3. Hinglish input → natural Hinglish response.
-4. Mixed-language input → naturally match the user's mixture.
-5. If the user changes language during a conversation, switch with them immediately.
-6. Preserve conversation context when switching languages (e.g. active customer, previous amounts).
-7. Tool calls and database operations are language-independent.
-8. Never translate the user's command into another language merely for processing.
-9. The final spoken response (either in speech_response parameter of a tool call or as a direct message) must use the appropriate language/style matching the user.
-10. Confirmations, clarification questions, errors, navigation responses, transaction results, and reports must all follow the same language rule.
-11. Do not use generic fallback responses when the user's intent can be understood.
-12. Do not depend on example phrases, keyword matching, regex matching, or a fixed command dictionary.
+function resolveCustomerInServer(input: string, activeCust?: any): {
+  status: 'EXACT' | 'AMBIGUOUS' | 'NOT_FOUND' | 'PRONOUN' | 'NO_NAME';
+  customer?: any;
+  candidates?: any[];
+  searchedName?: string;
+} {
+  if (!input || !input.trim()) return { status: 'NO_NAME' };
+  const inputLower = input.toLowerCase().trim();
 
-NAVIGATION & OPENING TABS / SMALLER THINGS:
-13. If the user is telling to open ANY tab of website then open it, even the smaller things!
-    Always call the 'navigate' tool for any open / show / view request:
-    - Main pages & subtabs:
-      * 'home' -> Dashboard, home overview (e.g. "डैशबोर्ड खोलो", "Show home", "Dashboard")
-      * 'customers' -> Customer list & khata (e.g. "कस्टमर्स खोलो", "Show parties", "Customer ledger")
-      * 'billing' -> Billing and invoice generator (e.g. "बिलिंग खोलो", "Open invoice tab", "Bill generate karo")
-      * 'transactions' -> Transactions passbook (e.g. "लेन-देन खोलो", "Show transactions", "Passbook")
-      * 'stocks' -> Inventory and stocks (e.g. "स्टॉक खोलो", "Inventory page", "Products")
-    - Modals, forms & smaller UI elements:
-      * 'add_customer_modal' -> Open Add Customer dialog/form (e.g. "नया ग्राहक जोड़ने का फॉर्म खोलो", "Open add customer modal", "Naya customer popup")
-      * 'add_transaction_modal' -> Open Add Transaction dialog (Cash In / Out) (e.g. "लेन-देन दर्ज करने का फॉर्म खोलो", "Open transaction dialog", "Cash in entry box", "Expense modal")
-      * 'add_product_modal' -> Open Add Product / Item dialog (e.g. "नया सामान जोड़ने का फॉर्म खोलो", "Open add product modal", "Naya item add dialog")
-      * 'customer_ledger_modal' -> Open a specific customer's ledger modal popup (e.g. "रवि का लेजर खोलो", "Open Rahul's ledger", "Uska khata dialog dikhao") -> set customer_name parameter
-      * 'invoice_modal' -> Open Invoice preview & print modal (e.g. "बिल रसीद खोलो", "Show invoice receipt modal", "Invoice preview")
-      * 'settings_modal' -> Open Shop Settings dialog (e.g. "दुकान की सेटिंग खोलो", "Open settings modal", "Settings kholo")
-      * 'search_modal' -> Open Global Search bar popup (e.g. "सर्च बार खोलो", "Open search bar", "Search box dikhao")
-      * 'voice_modal' -> Open Voice Record & Assistant modal (e.g. "वॉयस डायलॉग खोलो", "Open voice modal")
-      * 'toggle_sidebar' -> Open, close, expand or collapse sidebar (e.g. "साइडबार खोलो", "Sidebar band karo", "Toggle sidebar")
+  // 1. Check pronouns ("usne", "uska", "uske", "usmein", "unhone", "unka", "woh")
+  const isPronoun = /\b(usne|usmein|usme|uski|uska|uske|usse|unhone|unka|unki|unke|unhe|unko|unse|isme|ismein|iska|woh)\b|उसने|उन्होंने|उसमें|उसका|उसकी|उसके|उनका/i.test(inputLower);
+  if (isPronoun && activeCust) {
+    const cust = customers.find(c => c.id === activeCust.id) || activeCust;
+    return { status: 'PRONOUN', customer: cust, searchedName: cust.name };
+  }
 
-CAPABILITY & LEDGER TOOLS:
-- Customers: add_customer, get_customer, update_customer, delete_customer
-- Transactions: add_transaction (credit=jama/in, debit=udhar/out), get_transactions, update_transaction, delete_transaction
-- Balances: get_balance (individual customer), get_account_balance (total market receivables across all customers)
-- Reports: get_report (today, week, month sales & expenses)
-- Reminders: add_reminder, get_reminders, update_reminder, delete_reminder
-- Ending Conversation: end_conversation (when the merchant indicates they are done, finished, saying goodbye, or acknowledging with "theek hai", "ok", "bas", "thank you", "bye")
+  // 2. Direct exact name or ID match
+  const exact = customers.find(c => c.name.toLowerCase() === inputLower || c.id.toLowerCase() === inputLower);
+  if (exact) return { status: 'EXACT', customer: exact, searchedName: exact.name };
 
-CRITICAL TRANSACTION & KHATA ENTRY INSTRUCTIONS:
-- Whenever the user speaks an entry command like:
-  * "कृपा शंकर के अकाउंट में ₹1000 उधर लिख दो" / "कृपा शंकर के खाते में 1000 उधार लिखो"
-  * "सुरेश को 500 उधार दिए" / "रमेश को 200 दे दो"
-  * "राहुल के खाते में 500 जमा लिखो" / "प्रिया से 1200 पेमेंट आई"
-  * "Kripa Shankar ke account mein 1000 udhar likh do"
-  * "Usmein 500 add kar do" / "उसके खाते में 500 लिख दो"
-  You MUST call 'add_transaction' immediately with:
-  * customer_name: The customer or party name mentioned (e.g. 'कृपा शंकर', 'Ramesh', 'Rahul') or from activeCustomer if pronoun like 'uske khate me'.
-  * amount: The numerical amount in Rupees (e.g. 1000, 500).
-  * transaction_type: 'debit' for udhar/उधार/उधर/given/diye/likh do udhar/debit, 'credit' for jama/जमा/received/mila/payment.
-  * speech_response: Natural confirmation in user language, e.g. "हो गया। कृपा शंकर के खाते में ₹1,000 उधार लिख दिए हैं।"
-  * NEVER reply with a generic question like "जी बताइए, क्या एंट्री करनी है?" when the amount or customer is specified!
+  // 3. Normalized name match
+  const normInput = normalizeCustomerName(input);
+  const normMatch = customers.find(c => normalizeCustomerName(c.name) === normInput);
+  if (normMatch) return { status: 'EXACT', customer: normMatch, searchedName: normMatch.name };
 
-CONVERSATION ENDING & CLOSING RULES:
-- When the merchant acknowledges completion, says they are finished, or gives a closing expression (e.g. "theek hai", "theek hai bhai", "ok", "okay", "alright", "bas", "bas itna hi", "that's all", "thank you", "thanks", "bye", "goodbye", "alvida", "ठीक है", "बस"):
-  * If there is NO pending confirmation or unfinished action: You MUST call 'end_conversation' with a polite, friendly closing farewell in the user's matching language (e.g. "Theek hai, dhanyawad! Have a great day.", "अलविदा! कोई और काम हो तो बताइएगा।", "Alright, thank you! Have a great day."). Do NOT ask "How can I help you" or give generic replies.
-- CRITICAL CONTEXTUAL DISTINCTION:
-  * "Theek hai" / "ok" / "haan" CAN mean confirmation IF Jarvis previously asked for confirmation (e.g. "Confirm karoon?", "Delete karoon?"). If the user is confirming a pending action, execute/confirm the action, do NOT end the conversation!
-  * Only call 'end_conversation' when the merchant is acknowledging completion or closing the conversation.
+  // 4. Phone number match
+  const phoneDigits = input.replace(/[^0-9]/g, '');
+  if (phoneDigits.length >= 10) {
+    const phoneMatch = customers.find(c => c.phone && c.phone.replace(/[^0-9]/g, '').includes(phoneDigits.slice(-10)));
+    if (phoneMatch) return { status: 'EXACT', customer: phoneMatch, searchedName: phoneMatch.name };
+  }
 
-Pronouns like "usmein", "uska", "uski", "woh", "that customer", "the last one" resolve to the currently active customer: ${activeCustomer ? `${activeCustomer.name} (Balance: ₹${activeCustomer.balance})` : 'None'}.
+  // 5. Full customer name present in speech (longest first to avoid substring errors)
+  const sorted = [...customers].sort((a, b) => b.name.length - a.name.length);
+  const fullMatches: any[] = [];
+  for (const c of sorted) {
+    const esc = c.name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`(?:^|[^a-zA-Z0-9\u0900-\u097F])${esc}(?:$|[^a-zA-Z0-9\u0900-\u097F])`, 'i');
+    if (regex.test(inputLower)) {
+      fullMatches.push(c);
+    }
+  }
+  if (fullMatches.length === 1) return { status: 'EXACT', customer: fullMatches[0], searchedName: fullMatches[0].name };
+  if (fullMatches.length > 1) return { status: 'AMBIGUOUS', candidates: fullMatches, searchedName: fullMatches[0].name };
 
-CURRENT CONVERSATION CONTEXT STATE:
-- Pending confirmation: ${context?.pendingConfirmation ? JSON.stringify(context.pendingConfirmation) : 'NONE'}
-- Pending slot filling: ${context?.pendingSlotFilling ? JSON.stringify(context.pendingSlotFilling) : 'NONE'}
+  // 6. First-name or distinct token match
+  const firstMatches: any[] = [];
+  for (const c of customers) {
+    const firstName = c.name.toLowerCase().split(' ')[0];
+    if (firstName && firstName.length >= 3 && !FORBIDDEN_CUSTOMER_PHRASES.has(firstName)) {
+      const escFirst = firstName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`(?:^|[^a-zA-Z0-9\u0900-\u097F])${escFirst}(?:$|[^a-zA-Z0-9\u0900-\u097F])`, 'i');
+      if (regex.test(inputLower)) {
+        if (!firstMatches.some(m => m.id === c.id)) {
+          firstMatches.push(c);
+        }
+      }
+    }
+  }
+  if (firstMatches.length === 1) return { status: 'EXACT', customer: firstMatches[0], searchedName: firstMatches[0].name };
+  if (firstMatches.length > 1) return { status: 'AMBIGUOUS', candidates: firstMatches, searchedName: firstMatches[0].name.split(' ')[0] };
 
-CRITICAL ACTION DECISION FOR ACKNOWLEDGMENTS ("theek hai", "ok", "alright", "bas", "thanks", "bye"):
-- If Pending confirmation is NOT NONE: The user is confirming the pending action. Execute that action now!
-- If Pending confirmation is NONE: The user is acknowledging the previous answer/action and is closing the conversation. You MUST call the 'end_conversation' tool with a friendly farewell in their language! Do NOT ask "how can I help" or reply with text.`;
+  // 7. Explicit customer creation extraction (e.g. "Add customer Ramesh" or "Ramesh ko customer add karo")
+  const creationMatch = 
+    inputLower.match(/(?:add|create)\s+([a-zA-Z\s]+?)\s+(?:as\s+(?:a\s+)?customer|to\s+customers)/i) ||
+    inputLower.match(/(?:customer\s+banao|customer\s+add\s+karo)\s+([a-zA-Z\s]+)/i) ||
+    inputLower.match(/([a-zA-Z\s\u0900-\u097F]+?)\s*(?:ko|karke)?\s*(?:customer|ग्राहक)\s*(?:banao|bana\s*do|add\s*karo|add\s*kar\s*do|जोड़ो|बनाओ)/i);
+  if (creationMatch && creationMatch[1]) {
+    const clean = cleanCustomerName(creationMatch[1]);
+    if (clean) return { status: 'NOT_FOUND', searchedName: clean };
+  }
 
-  const tools = [
-    {
-      functionDeclarations: [
-        // END CONVERSATION
-        {
-          name: 'end_conversation',
-          description: 'Close and end the active voice session when the user indicates the conversation is finished, done, or says goodbye (e.g. theek hai, ok, bas, thank you, bye after an answer). Do NOT call this if user is confirming a pending action or answering slot filling.',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              speech_response: {
-                type: Type.STRING,
-                description: 'Polite natural farewell in the exact language and style used by the merchant',
-              },
-            },
-            required: ['speech_response'],
-          },
-        },
+  // 8. Candidate before grammatical particle
+  const partMatch = input.match(/(?:^|अरे|जार्विस|भाई|सुनो)?\s*([a-zA-Z\u0900-\u097F]{2,20}(?:\s+[a-zA-Z\u0900-\u097F]{2,20})?)\s*(?:ne|ko|ka|ki|ke|se|ने|को|का|की|के|से)\s+/i);
+  if (partMatch && partMatch[1]) {
+    const cand = cleanCustomerName(partMatch[1]);
+    if (cand) {
+      const match = customers.find(c => c.name.toLowerCase().includes(cand.toLowerCase()));
+      if (match) return { status: 'EXACT', customer: match, searchedName: match.name };
+      return { status: 'NOT_FOUND', searchedName: cand };
+    }
+  }
 
-        // NAVIGATION (Tabs & smaller things)
-        {
-          name: 'navigate',
-          description: 'Open any page, tab, subtab, modal dialog, form, or UI component in NotiBook (even smaller things)',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              target: {
-                type: Type.STRING,
-                description: 'Target to open: home, customers, billing, transactions, stocks, add_customer_modal, add_transaction_modal, add_product_modal, customer_ledger_modal, invoice_modal, settings_modal, search_modal, voice_modal, toggle_sidebar',
-              },
-              customer_name: {
-                type: Type.STRING,
-                description: 'Customer name if opening a customer ledger or specific transaction form',
-              },
-              transaction_type: {
-                type: Type.STRING,
-                description: 'credit (cash in) or debit (cash out) if opening transaction modal',
-              },
-              speech_response: {
-                type: Type.STRING,
-                description: 'Natural spoken response confirming navigation in the exact language and style used by the user',
-              },
-            },
-            required: ['target', 'speech_response'],
-          },
-        },
+  return { status: 'NO_NAME' };
+}
 
-        // CUSTOMERS
-        {
-          name: 'add_customer',
-          description: 'Add a new customer to NotiBook ledger',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              name: { type: Type.STRING, description: 'Customer full name' },
-              phone: { type: Type.STRING, description: 'Optional mobile phone number' },
-              opening_balance: { type: Type.NUMBER, description: 'Optional opening balance' },
-              address: { type: Type.STRING, description: 'Optional location or address' },
-              speech_response: { type: Type.STRING, description: 'Natural spoken confirmation in user language' },
-            },
-            required: ['name', 'speech_response'],
-          },
-        },
-        {
-          name: 'get_customer',
-          description: 'Look up customer profile and ledger information',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              customer_name: { type: Type.STRING, description: 'Customer name or ID' },
-              speech_response: { type: Type.STRING, description: 'Natural spoken answer in user language' },
-            },
-            required: ['customer_name', 'speech_response'],
-          },
-        },
-        {
-          name: 'update_customer',
-          description: 'Update customer phone, address, or details',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              customer_name: { type: Type.STRING, description: 'Customer name' },
-              phone: { type: Type.STRING, description: 'Updated phone' },
-              address: { type: Type.STRING, description: 'Updated address' },
-              speech_response: { type: Type.STRING, description: 'Natural spoken confirmation in user language' },
-            },
-            required: ['customer_name', 'speech_response'],
-          },
-        },
-        {
-          name: 'delete_customer',
-          description: 'Delete customer record from ledger (requires confirmation)',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              customer_name: { type: Type.STRING, description: 'Customer name' },
-              customer_id: { type: Type.STRING, description: 'Optional customer ID' },
-              speech_response: { type: Type.STRING, description: 'Natural spoken confirmation prompt in user language' },
-            },
-            required: ['customer_name', 'speech_response'],
-          },
-        },
+function detectServerFinancialIntent(raw: string): {
+  intent: 'PAYMENT_RECEIVED' | 'ADD_CUSTOMER_DEBT' | 'GET_CUSTOMER_BALANCE' | 'GET_ACCOUNT_BALANCE' | 'CREATE_CUSTOMER' | 'GET_TRANSACTIONS' | 'NAVIGATE' | 'END_CONVERSATION' | 'UNKNOWN';
+  amount?: number;
+  hasAmount: boolean;
+  target?: string;
+} {
+  const lower = raw.toLowerCase().trim();
 
-        // TRANSACTIONS
-        {
-          name: 'add_transaction',
-          description: 'Record a money in/out or credit/debit transaction for a customer or expense',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              customer_name: { type: Type.STRING, description: 'Name of customer or party' },
-              amount: { type: Type.NUMBER, description: 'Amount in Rupees' },
-              transaction_type: { type: Type.STRING, enum: ['credit', 'debit'], description: 'credit = payment received/jama, debit = given on credit/udhar' },
-              payment_mode: { type: Type.STRING, description: 'Cash, UPI, Bank' },
-              description: { type: Type.STRING, description: 'Optional note or item description' },
-              speech_response: { type: Type.STRING, description: 'Natural spoken confirmation in user language' },
-            },
-            required: ['amount', 'transaction_type', 'speech_response'],
-          },
-        },
-        {
-          name: 'get_transactions',
-          description: 'Get recent transaction entries for a customer or shop',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              customer_name: { type: Type.STRING, description: 'Optional customer name' },
-              limit: { type: Type.NUMBER, description: 'Max number of transactions to return' },
-              speech_response: { type: Type.STRING, description: 'Natural spoken answer in user language' },
-            },
-            required: ['speech_response'],
-          },
-        },
-        {
-          name: 'update_transaction',
-          description: 'Update an existing transaction details or amount',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              transaction_id: { type: Type.STRING, description: 'Transaction ID' },
-              customer_name: { type: Type.STRING, description: 'Customer name' },
-              amount: { type: Type.NUMBER, description: 'Updated amount' },
-              description: { type: Type.STRING, description: 'Updated note' },
-              speech_response: { type: Type.STRING, description: 'Natural spoken confirmation in user language' },
-            },
-            required: ['speech_response'],
-          },
-        },
-        {
-          name: 'delete_transaction',
-          description: 'Delete a previous transaction (requires confirmation)',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              transaction_id: { type: Type.STRING, description: 'Optional ID' },
-              customer_name: { type: Type.STRING, description: 'Customer name' },
-              speech_response: { type: Type.STRING, description: 'Natural confirmation prompt in user language' },
-            },
-            required: ['speech_response'],
-          },
-        },
+  // 1. Closing
+  const isClosing = 
+    lower === 'theek hai' || lower === 'theek h' || lower === 'ok' || lower === 'okay' ||
+    lower === 'alright' || lower === 'all right' || lower === 'bas' || lower === 'bas itna hi' ||
+    lower === 'that is all' || lower === 'thats all' || lower === 'bye' || lower === 'goodbye' ||
+    lower === 'bye jarvis' || lower.includes('alvida') || raw === 'ठीक है' || raw === 'बस' || raw === 'अलविदा' || raw === 'धन्यवाद';
+  if (isClosing) {
+    return { intent: 'END_CONVERSATION', hasAmount: false };
+  }
 
-        // BALANCE
-        {
-          name: 'get_balance',
-          description: 'Get the current balance and due status for an individual customer',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              customer_name: { type: Type.STRING, description: 'Customer name' },
-              speech_response: { type: Type.STRING, description: 'Natural spoken answer with balance in user language' },
-            },
-            required: ['customer_name', 'speech_response'],
-          },
-        },
-        {
-          name: 'get_account_balance',
-          description: 'Get total market pending receivables and dues across all customers',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              speech_response: { type: Type.STRING, description: 'Natural spoken answer with total shop dues in user language' },
-            },
-            required: ['speech_response'],
-          },
-        },
+  // 2. Navigation
+  if (lower.includes('setting') || raw.includes('सेटिंग')) return { intent: 'NAVIGATE', target: 'settings_modal', hasAmount: false };
+  if (lower.includes('search') || raw.includes('सर्च')) return { intent: 'NAVIGATE', target: 'search_modal', hasAmount: false };
+  if (lower.includes('add customer') && (lower.includes('modal') || lower.includes('form'))) return { intent: 'NAVIGATE', target: 'add_customer_modal', hasAmount: false };
+  if (lower.includes('add transaction') || lower.includes('entry form') || lower.includes('cash in') || lower.includes('cash out')) return { intent: 'NAVIGATE', target: 'add_transaction_modal', hasAmount: false };
+  if (lower.includes('add product') || lower.includes('product form')) return { intent: 'NAVIGATE', target: 'add_product_modal', hasAmount: false };
+  if (lower.includes('invoice') || lower.includes('receipt') || raw.includes('रसीद')) return { intent: 'NAVIGATE', target: 'invoice_modal', hasAmount: false };
+  if (lower.includes('sidebar') || raw.includes('साइडबार')) return { intent: 'NAVIGATE', target: 'toggle_sidebar', hasAmount: false };
+  if (lower.includes('ledger') || lower.includes('khata kholo') || raw.includes('खाता खोलो') || raw.includes('लेजर खोलो')) return { intent: 'NAVIGATE', target: 'customer_ledger_modal', hasAmount: false };
+  if (lower.includes('customer page') || lower.includes('customers kholo') || raw.includes('कस्टमर्स खोलो')) return { intent: 'NAVIGATE', target: 'customers', hasAmount: false };
+  if (lower.includes('transaction page') || lower.includes('transactions kholo') || raw.includes('लेनदेन खोलो')) return { intent: 'NAVIGATE', target: 'transactions', hasAmount: false };
+  if (lower.includes('billing') || raw.includes('बिलिंग खोलो')) return { intent: 'NAVIGATE', target: 'billing', hasAmount: false };
+  if (lower.includes('stock') || raw.includes('स्टॉक खोलो') || lower.includes('inventory')) return { intent: 'NAVIGATE', target: 'stocks', hasAmount: false };
+  if (lower.includes('home') || lower.includes('dashboard') || raw.includes('होम') || raw.includes('डैशबोर्ड')) return { intent: 'NAVIGATE', target: 'home', hasAmount: false };
 
-        // REPORTS
-        {
-          name: 'get_report',
-          description: 'Get business sales, expenses, and profit summary for today or week',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              period: { type: Type.STRING, enum: ['today', 'week', 'month', '7days'], description: 'Time period' },
-              speech_response: { type: Type.STRING, description: 'Natural spoken summary in user language' },
-            },
-            required: ['speech_response'],
-          },
-        },
+  // 3. Amount extraction
+  const amtMatch = raw.match(/(?:₹|rs\.?|inr|रुपये|रुपए)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:₹|rs\.?|inr|रुपये|रुपए)?/i);
+  const amount = amtMatch ? parseFloat(amtMatch[1].replace(/,/g, '')) : undefined;
+  const hasAmount = amount !== undefined && !isNaN(amount) && amount > 0;
 
-        // REMINDERS
-        {
-          name: 'add_reminder',
-          description: 'Create a payment reminder for a customer',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              customer_name: { type: Type.STRING, description: 'Customer name' },
-              amount: { type: Type.NUMBER, description: 'Due amount' },
-              due_date: { type: Type.STRING, description: 'Target date (YYYY-MM-DD)' },
-              message: { type: Type.STRING, description: 'Reminder note' },
-              speech_response: { type: Type.STRING, description: 'Natural spoken confirmation in user language' },
-            },
-            required: ['customer_name', 'speech_response'],
-          },
-        },
-        {
-          name: 'get_reminders',
-          description: 'List pending payment reminders',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              customer_name: { type: Type.STRING, description: 'Optional customer name' },
-              speech_response: { type: Type.STRING, description: 'Natural spoken answer in user language' },
-            },
-            required: ['speech_response'],
-          },
-        },
-        {
-          name: 'update_reminder',
-          description: 'Update reminder status to completed or change due date',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              reminder_id: { type: Type.STRING, description: 'Reminder ID' },
-              status: { type: Type.STRING, enum: ['pending', 'completed'] },
-              speech_response: { type: Type.STRING, description: 'Natural spoken confirmation in user language' },
-            },
-            required: ['reminder_id', 'speech_response'],
-          },
-        },
-        {
-          name: 'delete_reminder',
-          description: 'Delete a reminder',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              reminder_id: { type: Type.STRING, description: 'Reminder ID' },
-              customer_name: { type: Type.STRING, description: 'Customer name' },
-              speech_response: { type: Type.STRING, description: 'Natural spoken confirmation in user language' },
-            },
-            required: ['speech_response'],
-          },
-        },
-      ],
-    },
-  ];
+  // 4. Explicit Customer Creation
+  const isCreateCust = 
+    /(?:add|create)\s+([a-zA-Z\s]+?)\s+(?:as\s+(?:a\s+)?customer|to\s+customers)/i.test(lower) ||
+    /(?:customer\s+banao|customer\s+add\s+karo|naya\s+customer\s+add\s+karo|naya\s+customer\s+banao)/i.test(lower) ||
+    /([a-zA-Z\s\u0900-\u097F]+?)\s*(?:ko|karke)?\s*(?:customer|ग्राहक)\s*(?:banao|bana\s*do|add\s*karo|add\s*kar\s*do|जोड़ो|बनाओ)/i.test(lower) ||
+    /^(?:new\s+customer|naya\s+customer|नया\s+ग्राहक|नया\s+कस्टमर)\s+[a-zA-Z\u0900-\u097F]+/i.test(lower) ||
+    /^(?:customer\s+banao|naya\s+customer\s+banao|add\s+customer|create\s+customer)$/i.test(lower);
+  if (isCreateCust) {
+    return { intent: 'CREATE_CUSTOMER', hasAmount: false };
+  }
 
-  if (ai) {
-    const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-pro'];
-    let lastErr: any = null;
+  // 5. Account balance
+  const isAccountBal = 
+    /\b(total\s+udhar|market\s+udhar|market\s+me|baki\s+paisa|sabka\s+udhar|kul\s+udhar|kul\s+bakaya|pending\s+dues|total\s+dues|lena\s+hai)\b/i.test(lower) ||
+    /कुल\s*उधारी|बाकी\s*पैसा|कुल\s*बकाया|मार्केट\s*में|लेना\s*है|सबका\s*उधार/i.test(raw);
+  if (isAccountBal) {
+    return { intent: 'GET_ACCOUNT_BALANCE', hasAmount: false };
+  }
 
-    // Build conversation contents with history if available
-    let contentsPayload: any = message;
-    if (context && Array.isArray(context.recentTurns) && context.recentTurns.length > 0) {
-      const history = context.recentTurns.slice(-8).map((turn: any) => ({
-        role: turn.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: String(turn.text || '') }],
-      }));
-      history.push({
-        role: 'user',
-        parts: [{ text: String(message || '') }],
-      });
-      contentsPayload = history;
+  // 6. Minus reduction -> ALWAYS PAYMENT_RECEIVED
+  const isMinus = 
+    /\b(minus\s*karke\s*batao|minus\s*karo|minus\s*kar\s*do|minus|kam\s*karo|kam\s*kar\s*do|khate\s*mein\s*se\s*minus)\b/i.test(lower) ||
+    /माइनस\s*करके\s*बताओ|माइनस\s*करो|माइनस\s*कर\s*दो|माइनस|कम\s*करो/i.test(raw);
+  if (isMinus) {
+    return { intent: 'PAYMENT_RECEIVED', amount, hasAmount };
+  }
+
+  // 7. Payment received
+  const isPayment = 
+    /\b(?:ne\s+\d+|ne\s+payment|ka\s+\d+\s+aa|ka\s+\d+\s+mil|se\s+\d+\s+receive|se\s+payment)\b/i.test(lower) ||
+    /\b(aa\s*chuka\s*hai|aa\s*chuka|aa\s*gaya|aa\s*gayi|aaye|aaya|mil\s*gaya|mil\s*gaye|mile|receive\s*hua|receive\s*hue|received|de\s*diye|pay\s*kar\s*diye|pay\s*kiya|pay\s*kar\s*di|payment\s*kar\s*di|payment\s*aayi|wapas\s*kar\s*diye|wapas\s*diye|jama|jama\s*karo|jama\s*likho|jama\s*kar\s*do)\b/i.test(lower) ||
+    /आ\s*चुका\s*है|आ\s*चुका|आ\s*गया|आ\s*गई|आए|आया|मिल\s*गया|मिल\s*गए|मिले|प्राप्त\s*हुए|पेमेंट\s*कर\s*दी|पेमेंट\s*आई|दे\s*दिए|वापस\s*कर\s*दिए|जमा|जमा\s*करो|जमा\s*लिखो/i.test(raw);
+  if (isPayment) {
+    return { intent: 'PAYMENT_RECEIVED', amount, hasAmount };
+  }
+
+  // 8. Credit given (udhar, debit)
+  const isDebt = 
+    /\b(udhar|udhari|debit|le\s*gaya|samaan\s*diya|udhar\s*likho|udhar\s*likh\s*do|udhar\s*chadha\s*do|udhar\s*diya)\b/i.test(lower) ||
+    /उधार|उधर|उधारी|डेबिट|सामान\s*दिया|उधार\s*लिखो|उधार\s*लिख\s*दो|उधार\s*चढ़ा\s*दो|उधार\s*दिया/i.test(raw);
+  if (isDebt) {
+    return { intent: 'ADD_CUSTOMER_DEBT', amount, hasAmount };
+  }
+
+  // Check "ne ... diye" vs "ko ... diye"
+  if (/\bne\b/i.test(lower) && /\b(diye|diya|de\s*diye)\b/i.test(lower)) {
+    return { intent: 'PAYMENT_RECEIVED', amount, hasAmount };
+  }
+  if (/\bko\b/i.test(lower) && /\b(udhar|udhari|diye|diya)\b/i.test(lower)) {
+    return { intent: 'ADD_CUSTOMER_DEBT', amount, hasAmount };
+  }
+
+  // 9. Balance query
+  const isBal = 
+    /\b(balance|baki\s*hai|kitna\s*hai|kitna\s*baki|dues|hisab\s*batao)\b/i.test(lower) ||
+    /बैलेंस|कितना\s*बाकी|बकाया|हिसाब\s*बताओ/i.test(raw);
+  if (isBal && !lower.includes('add') && !lower.includes('likh')) {
+    return { intent: 'GET_CUSTOMER_BALANCE', hasAmount: false };
+  }
+
+  return { intent: 'UNKNOWN', amount, hasAmount };
+}
+
+// Authoritative Backend Execution Engine
+function handleSemanticIntent(
+  intent: string,
+  params: { customer_name?: string; is_pronoun?: boolean; amount?: number; transaction_type?: string; phone?: string; target?: string; period?: string; speech_response?: string },
+  userLang: 'hindi' | 'hinglish' | 'english',
+  context?: any,
+  activeCustomer?: any
+): { reply: string; toolCall?: any; updatedCustomer?: any; newTransaction?: any } {
+  const normIntent = intent === 'add_transaction'
+    ? (params.transaction_type === 'debit' ? 'ADD_CUSTOMER_DEBT' : 'PAYMENT_RECEIVED')
+    : (intent === 'record_payment' ? 'PAYMENT_RECEIVED' : intent);
+
+  // 1. END CONVERSATION
+  if (normIntent === 'end_conversation' || normIntent === 'END_CONVERSATION') {
+    const farewell = userLang === 'hindi'
+      ? 'ठीक है, आपका बहुत धन्यवाद! आपका दिन शुभ हो।'
+      : (userLang === 'hinglish' ? 'Theek hai, dhanyawad! Have a great day.' : 'Alright, thank you! Have a great day.');
+    return {
+      reply: farewell,
+      toolCall: { name: 'end_conversation', args: { speech_response: farewell } }
+    };
+  }
+
+  // 2. NAVIGATION
+  if (normIntent === 'navigate' || normIntent === 'NAVIGATE') {
+    const target = params.target || 'home';
+    const speech = userLang === 'hindi'
+      ? `${target} खोल दिया गया है।`
+      : (userLang === 'hinglish' ? `${target} open kar diya hai.` : `Opening ${target}.`);
+    return {
+      reply: speech,
+      toolCall: { name: 'navigate', args: { target, speech_response: speech } }
+    };
+  }
+
+  // 3. GET ACCOUNT BALANCE (Total market dues)
+  if (normIntent === 'get_account_balance' || normIntent === 'GET_ACCOUNT_BALANCE') {
+    const total = customers.filter(c => c.balance > 0).reduce((s, c) => s + c.balance, 0);
+    const speech = userLang === 'hindi'
+      ? `मार्केट में कुल बकाया ₹${total.toLocaleString('en-IN')} लेना है।`
+      : (userLang === 'hinglish' ? `Market me total ₹${total.toLocaleString('en-IN')} baaki hai.` : `Total market receivables are ₹${total.toLocaleString('en-IN')}.`);
+    return {
+      reply: speech,
+      toolCall: { name: 'get_account_balance', args: { speech_response: speech } }
+    };
+  }
+
+  // 4. REPORTS
+  if (normIntent === 'get_report' || normIntent === 'GET_REPORT') {
+    const period = params.period || 'today';
+    const moneyIn = transactions.filter(t => t.type === 'in').reduce((s, t) => s + t.amount, 0);
+    const moneyOut = transactions.filter(t => t.type === 'out').reduce((s, t) => s + t.amount, 0);
+    const speech = userLang === 'hindi'
+      ? `आज की कुल बिक्री ₹${moneyIn.toLocaleString('en-IN')} और खर्चे ₹${moneyOut.toLocaleString('en-IN')} हैं।`
+      : (userLang === 'hinglish' ? `Aaj ka total collection ₹${moneyIn.toLocaleString('en-IN')} aur kharcha ₹${moneyOut.toLocaleString('en-IN')} hai.` : `Today's collections are ₹${moneyIn.toLocaleString('en-IN')} and expenses are ₹${moneyOut.toLocaleString('en-IN')}.`);
+    return {
+      reply: speech,
+      toolCall: { name: 'get_report', args: { period, speech_response: speech } }
+    };
+  }
+
+  // 5. CUSTOMER RESOLUTION AGAINST DATABASE
+  const rawCustomerName = params.customer_name || '';
+  const resolution = resolveCustomerInServer(rawCustomerName, activeCustomer);
+
+  // Check Ambiguity (e.g. 2 customers named "Ravi")
+  if (resolution.status === 'AMBIGUOUS' && resolution.candidates && resolution.candidates.length > 1) {
+    const candidateNames = resolution.candidates.map(c => c.name).join(userLang === 'hindi' ? ' या ' : (userLang === 'english' ? ' or ' : ' ya '));
+    const displayName = resolution.searchedName || rawCustomerName;
+    const msg = userLang === 'hindi'
+      ? `${displayName} नाम के ${resolution.candidates.length} कस्टमर्स मिल रहे हैं (${candidateNames})। आप किस ${displayName} की बात कर रहे हैं?`
+      : (userLang === 'english'
+        ? `Found ${resolution.candidates.length} customers matching "${displayName}" (${candidateNames}). Which one do you mean?`
+        : `${displayName} naam ke ${resolution.candidates.length} customers mil rahe hain (${candidateNames}). Kis ${displayName} ki baat kar rahe hain?`);
+    return { reply: msg };
+  }
+
+  // Customer Not Found for Financial Actions: DO NOT CREATE A CUSTOMER AUTOMATICALLY!
+  if (!resolution.customer && (normIntent === 'PAYMENT_RECEIVED' || normIntent === 'ADD_CUSTOMER_DEBT' || normIntent === 'GET_CUSTOMER_BALANCE' || normIntent === 'get_balance')) {
+    const cleanName = cleanCustomerName(rawCustomerName);
+    if (cleanName && cleanName.length >= 2) {
+      const msg = userLang === 'hindi'
+        ? `"${cleanName}" कस्टमर लिस्ट में नहीं मिल रहे। क्या आप उन्हें नया कस्टमर बनाना चाहते हैं?`
+        : (userLang === 'english'
+          ? `"${cleanName}" was not found in the customer list. Would you like to add them as a new customer?`
+          : `"${cleanName}" customer list mein nahi mil rahe. Kya aap unhe naya customer banana chahte hain?`);
+      return { reply: msg };
+    }
+  }
+
+  const targetCustomer = resolution.customer;
+
+  // 6. CREATE CUSTOMER (Only on explicit request)
+  if (normIntent === 'create_customer' || normIntent === 'CREATE_CUSTOMER' || normIntent === 'add_customer') {
+    const cleanName = cleanCustomerName(rawCustomerName || params.customer_name || 'New Customer');
+    if (!cleanName || cleanName.length < 2) {
+      const askMsg = userLang === 'hindi' ? 'किस नाम से नया ग्राहक बनाना है?' : (userLang === 'english' ? 'What is the name for the new customer?' : 'Kis naam se naya customer add karna hai?');
+      return { reply: askMsg };
+    }
+    const existing = customers.find(c => c.name.toLowerCase() === cleanName.toLowerCase());
+    if (existing) {
+      const msg = userLang === 'hindi'
+        ? `"${existing.name}" पहले से कस्टमर लिस्ट में मौजूद हैं।`
+        : (userLang === 'english' ? `"${existing.name}" already exists in the customer list.` : `"${existing.name}" pehle se customer list mein hain.`);
+      return { reply: msg };
     }
 
+    const newCust = {
+      id: `cust-${Date.now()}`,
+      name: cleanName,
+      phone: params.phone || '', // NEVER invent fake phone numbers!
+      address: '',
+      balance: 0,
+      lastTransactionDate: new Date().toISOString().slice(0, 10),
+      status: 'settled',
+      createdAt: new Date().toISOString().slice(0, 10),
+    };
+    customers.unshift(newCust);
+
+    const speech = userLang === 'hindi'
+      ? `नया ग्राहक "${cleanName}" जोड़ दिया गया है।`
+      : (userLang === 'english' ? `Added "${cleanName}" as a new customer.` : `Naya customer "${cleanName}" add kar diya hai.`);
+    return {
+      reply: speech,
+      toolCall: { name: 'add_customer', args: { name: cleanName, speech_response: speech } },
+      updatedCustomer: newCust,
+    };
+  }
+
+  // 7. GET CUSTOMER BALANCE (Real database value)
+  if (normIntent === 'get_customer_balance' || normIntent === 'GET_CUSTOMER_BALANCE' || normIntent === 'get_balance') {
+    if (!targetCustomer) {
+      const msg = userLang === 'hindi'
+        ? 'किस कस्टमर का बैलेंस जानना है?'
+        : (userLang === 'english' ? 'Which customer balance would you like to check?' : 'Kis customer ka balance janna hai?');
+      return { reply: msg };
+    }
+    const bal = targetCustomer.balance;
+    let speech = '';
+    if (bal > 0) {
+      speech = userLang === 'hindi'
+        ? `${targetCustomer.name} का ₹${bal.toLocaleString('en-IN')} बकाया है।`
+        : (userLang === 'english' ? `${targetCustomer.name}'s balance is ₹${bal.toLocaleString('en-IN')}.` : `${targetCustomer.name} ka ₹${bal.toLocaleString('en-IN')} baaki hai.`);
+    } else if (bal < 0) {
+      speech = userLang === 'hindi'
+        ? `${targetCustomer.name} का ₹${Math.abs(bal).toLocaleString('en-IN')} एडवांस जमा है।`
+        : (userLang === 'english' ? `${targetCustomer.name} has an advance deposit of ₹${Math.abs(bal).toLocaleString('en-IN')}.` : `${targetCustomer.name} ka ₹${Math.abs(bal).toLocaleString('en-IN')} advance deposit hai.`);
+    } else {
+      speech = userLang === 'hindi'
+        ? `${targetCustomer.name} का खाता बिल्कुल चुकता है, कोई बकाया नहीं है।`
+        : (userLang === 'english' ? `${targetCustomer.name}'s account is fully settled with zero dues.` : `${targetCustomer.name} ka account settled hai, koi balance baki nahi hai.`);
+    }
+    return {
+      reply: speech,
+      toolCall: { name: 'get_balance', args: { customer_name: targetCustomer.name, speech_response: speech } },
+      updatedCustomer: targetCustomer,
+    };
+  }
+
+  // 8. TRANSACTIONS (Payment Received vs Credit Given)
+  if (normIntent === 'PAYMENT_RECEIVED' || normIntent === 'ADD_CUSTOMER_DEBT') {
+    const isPayment = normIntent === 'PAYMENT_RECEIVED';
+
+    // Missing amount validation
+    if (!params.amount || params.amount <= 0) {
+      const msg = userLang === 'hindi'
+        ? (isPayment ? 'कितने रुपये प्राप्त हुए?' : 'कितने रुपये का उधार लिखना है?')
+        : (userLang === 'english'
+          ? (isPayment ? 'How much was received?' : 'How much credit to record?')
+          : (isPayment ? 'Kitne rupaye receive hue?' : 'Kitne rupaye ka udhar likhna hai?'));
+      return {
+        reply: msg,
+        toolCall: {
+          name: 'add_transaction',
+          args: {
+            customer_name: targetCustomer?.name,
+            transaction_type: isPayment ? 'credit' : 'debit',
+          }
+        }
+      };
+    }
+
+    const amt = Number(params.amount);
+    const activeTarget = targetCustomer || { id: 'cust-walkin', name: cleanCustomerName(rawCustomerName) || 'Walk-In Customer', balance: 0 };
+    const prev = activeTarget.balance || 0;
+    const newBal = isPayment ? prev - amt : prev + amt;
+
+    activeTarget.balance = newBal;
+    activeTarget.status = newBal > 0 ? 'due' : (newBal < 0 ? 'advance' : 'settled');
+    activeTarget.lastTransactionDate = new Date().toISOString().slice(0, 10);
+
+    const newTx = {
+      id: `tx-${Date.now()}`,
+      date: new Date().toLocaleString('en-IN', { hour12: false }),
+      type: isPayment ? 'in' : 'out',
+      category: isPayment ? 'Customer Payment' : 'Customer Credit',
+      description: isPayment ? `Payment from ${activeTarget.name}` : `Credit given to ${activeTarget.name}`,
+      partyName: activeTarget.name,
+      paymentMode: 'Cash',
+      amount: amt,
+      customerId: activeTarget.id,
+    };
+    transactions.unshift(newTx);
+
+    let speech = '';
+    if (isPayment) {
+      speech = userLang === 'hindi'
+        ? `${activeTarget.name} से ₹${amt.toLocaleString('en-IN')} प्राप्त हो गए। अब उनके खाते में ₹${newBal.toLocaleString('en-IN')} बाकी हैं।${newBal <= 0 ? ' खाता चुकता हो गया है।' : ''}`
+        : (userLang === 'english'
+          ? `Received ₹${amt.toLocaleString('en-IN')} from ${activeTarget.name}. Their new balance is ₹${newBal.toLocaleString('en-IN')}.${newBal <= 0 ? ' Account is fully settled.' : ''}`
+          : `${activeTarget.name} se ₹${amt.toLocaleString('en-IN')} receive ho gaye. Ab unke khate mein ₹${newBal.toLocaleString('en-IN')} baaki hain.${newBal <= 0 ? ' Khata settled ho gaya hai.' : ''}`);
+    } else {
+      speech = userLang === 'hindi'
+        ? `${activeTarget.name} के खाते में ₹${amt.toLocaleString('en-IN')} उधार लिख दिए हैं। अब उनका कुल बकाया ₹${newBal.toLocaleString('en-IN')} है।`
+        : (userLang === 'english'
+          ? `Recorded ₹${amt.toLocaleString('en-IN')} credit for ${activeTarget.name}. Total balance is now ₹${newBal.toLocaleString('en-IN')}.`
+          : `${activeTarget.name} ke account mein ₹${amt.toLocaleString('en-IN')} udhar likh diye hain. Ab unka total balance ₹${newBal.toLocaleString('en-IN')} hai.`);
+    }
+
+    return {
+      reply: speech,
+      toolCall: {
+        name: 'add_transaction',
+        args: {
+          customer_name: activeTarget.name,
+          amount: amt,
+          transaction_type: isPayment ? 'credit' : 'debit',
+          speech_response: speech,
+        }
+      },
+      updatedCustomer: activeTarget,
+      newTransaction: newTx,
+    };
+  }
+
+  // Fallback conversational prompt
+  const fallbackReply = userLang === 'hindi'
+    ? 'जी बताइए, क्या एंट्री करनी है?'
+    : (userLang === 'english' ? 'Yes, how can I assist you with your ledger?' : 'Haanji, batayein, kya update karna hai?');
+  return { reply: fallbackReply };
+}
+
+app.post('/api/voice/chat', async (req, res) => {
+  const { message, context, activeCustomer, userLanguage } = req.body;
+  const raw = String(message || '').trim();
+
+  // Detect language
+  const isHindi = /[\u0900-\u097F]/.test(raw);
+  const isHinglish = !isHindi && (
+    /\b(karo|karke|banao|batao|bataiye|diya|diye|liya|liye|hoga|hogi|honge|raha|rahi|rahe|kholo|dikhao|paisa|paise|rupaye|udhar|jama|mera|meri|mere|tera|teri|tere|uska|uski|usmein|usme|kya|kaun|kaise|kitna|kitne|bhai|khatabook|hisab|dhanyawad|shukriya|namaste|theek|achha|bikri|munafa|kharcha|kharch)\b/i.test(raw.toLowerCase()) ||
+    /\b(kar\s+do|de\s+do|bata\s+do|hata\s+do|bhej\s+do|market\s+me|khata\s+me|dukan\s+me|us\s+me|is\s+me|ka\s+balance|ki\s+last|hai\s+ya|hai\s+kya)\b/i.test(raw.toLowerCase())
+  );
+  const userLang: 'hindi' | 'hinglish' | 'english' = (userLanguage === 'english' || userLanguage === 'hindi' || userLanguage === 'hinglish')
+    ? userLanguage
+    : (isHindi ? 'hindi' : (isHinglish ? 'hinglish' : 'english'));
+
+  // If Gemini Live is available, call model with semantic guidelines
+  if (ai) {
+    const activeLangInstruction = userLang === 'english'
+      ? 'CRITICAL: User is speaking in English. Spoken and written responses MUST be in natural, professional English.'
+      : (userLang === 'hindi'
+          ? 'CRITICAL: User is speaking in Hindi. Responses MUST be in natural Hindi in Devanagari script.'
+          : 'Match the language naturally (English -> English, Hindi -> Hindi, Hinglish -> Hinglish).');
+
+    const systemInstruction = `You are Jarvis, the intelligent conversational voice assistant for NotiBook (smart business ledger & Khatabook for Indian merchants).
+${activeLangInstruction}
+
+CRITICAL SEMANTIC INTENT & KHATA RULES:
+1. "PAYMENT_RECEIVED":
+   - When customer pays or settles dues ("Rahul Sharma ka 2000 aa chuka hai to khate mein se 2000 minus karke batao", "Rahul ne 2000 diye", "Rahul ka 2000 mil gaya", "Rahul se 2000 receive hue", "2000 jama karo", "khate mein se 2000 minus karo", "2000 minus karke batao").
+   - CRITICAL: "MINUS" from khata or account ALWAYS means PAYMENT_RECEIVED (reduces outstanding, NOT debit!).
+   - "diye" when customer gives means payment received!
+   - Result: Customer outstanding balance DECREASES.
+2. "ADD_CUSTOMER_DEBT":
+   - When merchant gives goods or credit to customer ("Rahul ko 2000 udhar diya", "2000 udhar likho", "2000 debit karo").
+   - Result: Customer outstanding balance INCREASES.
+3. "GET_CUSTOMER_BALANCE": "Rahul ka balance batao", "kitna baki hai".
+4. "GET_ACCOUNT_BALANCE": "Total udhar kitna hai", "Market me kitna lena hai".
+5. "CREATE_CUSTOMER": ONLY explicit requests like "Rahul ko customer add karo", "New customer Rahul". NEVER create customer from payment sentences.
+6. ENTITY EXTRACTION:
+   - Extract the customer name entity ONLY (e.g. "Rahul Sharma"). NEVER include sentence fragments like "aa chuka hai to khate mein" or "minus karke batao" in customer_name!
+   - Pronouns like "usne", "uska", "uske", "usmein", "unhone", "woh" refer to activeCustomer: ${activeCustomer ? activeCustomer.name : 'None'}. Set is_pronoun: true.
+7. NEVER INVENT NUMBERS:
+   - Never invent amounts, balances, or phone numbers. If amount is missing (e.g. "Rahul ne payment kar di"), leave amount null!
+
+Tools:
+- add_transaction: customer_name (string), amount (number), transaction_type ('credit' = payment received/jama/minus, 'debit' = udhar/given)
+- get_balance: customer_name (string)
+- get_account_balance: ()
+- add_customer: name (string), phone (string)
+- navigate: target (string)
+- end_conversation: ()`;
+
+    const tools = [
+      {
+        functionDeclarations: [
+          {
+            name: 'add_transaction',
+            description: 'Record a payment received (credit/jama/minus) or credit given (debit/udhar) for a customer',
+            parameters: {
+              type: Type.OBJECT,
+              properties: {
+                customer_name: { type: Type.STRING, description: 'Clean customer name entity only. NEVER include sentence fragments.' },
+                amount: { type: Type.NUMBER, description: 'Exact amount provided by user. Leave null if not provided.' },
+                transaction_type: { type: Type.STRING, enum: ['credit', 'debit'], description: 'credit = payment received/jama/minus from khata, debit = credit given/udhar' },
+                is_pronoun: { type: Type.BOOLEAN, description: 'True if customer was referred to via pronoun (usne, uska, etc.)' },
+              },
+              required: ['transaction_type'],
+            },
+          },
+          {
+            name: 'get_balance',
+            description: 'Get individual customer balance',
+            parameters: {
+              type: Type.OBJECT,
+              properties: {
+                customer_name: { type: Type.STRING, description: 'Customer name' },
+                is_pronoun: { type: Type.BOOLEAN, description: 'True if referred to via pronoun' },
+              },
+              required: ['customer_name'],
+            },
+          },
+          {
+            name: 'get_account_balance',
+            description: 'Get total market dues across all customers',
+            parameters: { type: Type.OBJECT, properties: {} },
+          },
+          {
+            name: 'add_customer',
+            description: 'Explicitly add a new customer (only when explicitly requested)',
+            parameters: {
+              type: Type.OBJECT,
+              properties: {
+                name: { type: Type.STRING, description: 'Customer name' },
+                phone: { type: Type.STRING, description: 'Customer phone if provided' },
+              },
+              required: ['name'],
+            },
+          },
+          {
+            name: 'navigate',
+            description: 'Open any page, tab, subtab, or modal dialog',
+            parameters: {
+              type: Type.OBJECT,
+              properties: {
+                target: { type: Type.STRING, description: 'home, customers, billing, transactions, stocks, add_customer_modal, add_transaction_modal, customer_ledger_modal, settings_modal, search_modal' },
+              },
+              required: ['target'],
+            },
+          },
+          {
+            name: 'end_conversation',
+            description: 'Close session on user farewell or completion acknowledgment',
+            parameters: { type: Type.OBJECT, properties: {} },
+          },
+        ],
+      },
+    ];
+
+    const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash'];
     for (const modelName of candidateModels) {
       try {
         const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Gemini timeout on ${modelName}`)), 7000)
+          setTimeout(() => reject(new Error(`Timeout on ${modelName}`)), 7000)
         );
+
+        let contentsPayload: any = raw;
+        if (context && Array.isArray(context.recentTurns) && context.recentTurns.length > 0) {
+          const history = context.recentTurns.slice(-6).map((turn: any) => ({
+            role: turn.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: String(turn.text || '') }],
+          }));
+          history.push({ role: 'user', parts: [{ text: raw }] });
+          contentsPayload = history;
+        }
 
         const generatePromise = ai.models.generateContent({
           model: modelName,
@@ -922,446 +1154,57 @@ CRITICAL ACTION DECISION FOR ACKNOWLEDGMENTS ("theek hai", "ok", "alright", "bas
         });
 
         const response = (await Promise.race([generatePromise, timeoutPromise])) as any;
-
         const functionCalls = response.functionCalls;
+
         if (functionCalls && functionCalls.length > 0) {
           const call = functionCalls[0];
-          return res.json({
-            toolCall: {
-              name: call.name,
-              args: call.args,
-            },
-          });
+          // Execute through authoritative backend handler so real database values and checks apply
+          const executed = handleSemanticIntent(call.name, call.args, userLang, context, activeCustomer);
+          return res.json(executed);
         }
 
         if (response.text && response.text.trim()) {
-          const rawTrim = String(message || '').trim().toLowerCase();
+          const rawTrim = raw.toLowerCase();
           const isAcknowledgeClosing = (
             rawTrim === 'theek hai' || rawTrim === 'theek h' || rawTrim === 'ok' || rawTrim === 'okay' ||
             rawTrim === 'alright' || rawTrim === 'all right' || rawTrim === 'bas' || rawTrim === 'bas itna hi' ||
-            rawTrim === 'that is all' || rawTrim === 'thats all' || rawTrim === "that's all" ||
             rawTrim === 'bye' || rawTrim === 'goodbye' || rawTrim === 'thank you' || rawTrim === 'thanks' ||
-            rawTrim === 'thank you jarvis' || rawTrim === 'thanks jarvis' ||
-            message === 'ठीक है' || message === 'बस' || message === 'अलविदा' || message === 'धन्यवाद'
+            raw === 'ठीक है' || raw === 'बस' || raw === 'अलविदा' || raw === 'धन्यवाद'
           );
-
-          // If user gives closing acknowledgment and there is NO pending action, close the conversation
           if (isAcknowledgeClosing && !context?.pendingConfirmation && !context?.pendingSlotFilling) {
-            const isHindiText = /[\u0900-\u097F]/.test(message || '');
-            const isHinglishText = !isHindiText && /(karo|hai|theek|batao|khatabook|bhai)/i.test(message || '');
-            const farewell = isHindiText
-              ? 'ठीक है, आपका बहुत धन्यवाद! आपका दिन शुभ हो।'
-              : (isHinglishText ? 'Theek hai, dhanyawad! Have a great day.' : 'Alright, thank you! Have a great day.');
-            return res.json({
-              toolCall: {
-                name: 'end_conversation',
-                args: { speech_response: farewell }
-              }
-            });
+            const executed = handleSemanticIntent('end_conversation', {}, userLang, context, activeCustomer);
+            return res.json(executed);
           }
-
-          return res.json({
-            reply: response.text.trim(),
-          });
+          return res.json({ reply: response.text.trim() });
         }
         break;
       } catch (err: any) {
-        lastErr = err;
         console.warn(`[GeminiLive Server] Model ${modelName} error:`, err.message || err);
       }
     }
-    if (lastErr) {
-      console.warn('[GeminiLive Server] Candidate models exhausted, utilizing dynamic fallback:', lastErr.message);
-    }
   }
 
-  // --- DYNAMIC MULTILINGUAL CAPABILITY ENGINE & FALLBACK ---
-  const raw = String(message || '').trim();
-  const lower = raw.toLowerCase();
-  const isHindi = /[\u0900-\u097F]/.test(raw);
-  const isHinglish = !isHindi && (
-    /\b(karo|karke|banao|batao|bataiye|diya|diye|liya|liye|hoga|hogi|honge|raha|rahi|rahe|kholo|dikhao|paisa|paise|rupaye|udhar|jama|mera|meri|mere|tera|teri|tere|uska|uski|usmein|usme|kya|kaun|kaise|kitna|kitne|bhai|khatabook|hisab|dhanyawad|shukriya|namaste|theek|achha|bikri|munafa|kharcha|kharch)\b/i.test(lower) ||
-    /\b(kar\s+do|de\s+do|bata\s+do|hata\s+do|bhej\s+do|market\s+me|khata\s+me|dukan\s+me|us\s+me|is\s+me|ka\s+balance|ki\s+last|hai\s+ya|hai\s+kya)\b/i.test(lower)
+  // --- DYNAMIC SEMANTIC PARSER & BACKEND EXECUTION FALLBACK ---
+  const detected = detectServerFinancialIntent(raw);
+  const resolvedCustResult = resolveCustomerInServer(raw, activeCustomer);
+
+  const customerName = resolvedCustResult.customer?.name || (resolvedCustResult.status === 'NOT_FOUND' ? resolvedCustResult.searchedName : undefined);
+  const isPronoun = resolvedCustResult.status === 'PRONOUN';
+
+  const executionResult = handleSemanticIntent(
+    detected.intent,
+    {
+      customer_name: customerName,
+      is_pronoun: isPronoun,
+      amount: detected.amount,
+      target: detected.target,
+    },
+    userLang,
+    context,
+    activeCustomer
   );
-  const detectedLang: 'hindi' | 'hinglish' | 'english' = isHindi ? 'hindi' : (isHinglish ? 'hinglish' : 'english');
-  const userLang: 'hindi' | 'hinglish' | 'english' = (userLanguage === 'english' || userLanguage === 'hindi' || userLanguage === 'hinglish') ? userLanguage : detectedLang;
 
-  const custName = activeCustomer ? activeCustomer.name : 'Ravi';
-
-  // 0. Context-aware Closing / Farewell ("theek hai", "ok", "bas", "thank you", "bye", "alvida")
-  const isClosingPhrase =
-    lower === 'theek hai' ||
-    lower === 'theek h' ||
-    lower === 'ok' ||
-    lower === 'okay' ||
-    lower === 'alright' ||
-    lower === 'all right' ||
-    lower === 'bas' ||
-    lower === 'bas itna hi' ||
-    lower === 'that is all' ||
-    lower === 'thats all' ||
-    lower === 'bye' ||
-    lower === 'goodbye' ||
-    lower === 'bye jarvis' ||
-    lower.includes('alvida') ||
-    raw === 'ठीक है' ||
-    raw === 'बस' ||
-    raw === 'अलविदा';
-
-  if (isClosingPhrase && !context?.pendingConfirmation && !context?.pendingSlotFilling) {
-    const farewell = userLang === 'hindi'
-      ? 'ठीक है, आपका बहुत धन्यवाद! आपका दिन शुभ हो।'
-      : (userLang === 'hinglish' ? 'Theek hai, dhanyawad! Have a great day.' : 'Alright, thank you! Have a great day.');
-    return res.json({
-      toolCall: {
-        name: 'end_conversation',
-        args: { speech_response: farewell }
-      }
-    });
-  }
-
-  // 1. Customer Creation ("एक रमेश सा कस्टमर", "Add Ramesh as customer", "रमेश करके कस्टमर बनाओ", "Add customer")
-  const hindiSpecificCustomerMatch = raw.match(/एक\s+([^\s]+)\s+(?:सा\s+)?(?:कस्टमर|ग्राहक)/i);
-  const custAddMatchHindi = hindiSpecificCustomerMatch || raw.match(/([^\s]+)\s*(?:करके|सा|को)?\s*(?:कस्टमर|ग्राहक)\s*(?:बनाओ|जोड़ो|ऐड\s*करो|बना\s*दो|ऐड\s*कर\s*दो)/i);
-  const custAddMatchEnglish = lower.match(/(?:add|create)\s+([a-zA-Z\s]+?)\s+(?:as\s+(?:a\s+)?customer|to\s+customers)/i) ||
-                              lower.match(/(?:customer\s+banao|customer\s+add\s+karo)\s+([a-zA-Z\s]+)/i) ||
-                              lower.match(/([a-zA-Z\s]+?)\s*(?:ko|karke)?\s*customer\s*(?:banao|add\s*karo)/i);
-
-  if (custAddMatchHindi) {
-    const rawName = custAddMatchHindi[1].replace(/^(नया|न्यू|एक)\s*/, '').trim();
-    if (rawName && rawName !== 'कस्टमर' && rawName !== 'ग्राहक') {
-      return res.json({ toolCall: { name: 'add_customer', args: { name: rawName } } });
-    }
-  }
-  if (custAddMatchEnglish && (lower.includes('customer') || lower.includes('कस्टमर'))) {
-    const name = custAddMatchEnglish[1].replace(/^(new|naya)\s*/i, '').trim();
-    if (name && !name.includes('page') && !name.includes('kholo') && name !== 'a' && name !== 'the') {
-      return res.json({ toolCall: { name: 'add_customer', args: { name: name.charAt(0).toUpperCase() + name.slice(1) } } });
-    }
-  }
-
-  // Missing name follow-up prompt when user says just "Add customer" / "Customer banao" / "कस्टमर बनाओ"
-  if (
-    lower === 'add customer' ||
-    lower === 'create customer' ||
-    lower === 'customer banao' ||
-    lower === 'naya customer banao' ||
-    raw === 'कस्टमर बनाओ' ||
-    raw === 'नया ग्राहक बनाओ' ||
-    raw === 'ग्राहक जोड़ो'
-  ) {
-    if (userLang === 'hindi') {
-      return res.json({ reply: 'किस नाम से नया ग्राहक बनाना है?' });
-    }
-    if (userLang === 'hinglish') {
-      return res.json({ reply: 'Kis naam se naya customer add karna hai?' });
-    }
-    return res.json({ reply: 'What is the name for the new customer?' });
-  }
-
-  // 2. Navigation & Smaller Things
-  if (lower.includes('setting') || raw.includes('सेटिंग')) {
-    const speech = userLang === 'hindi' ? 'दुकान की सेटिंग खोल दी गई है।' : (userLang === 'hinglish' ? 'Shop settings open kar diya hai.' : 'Opening shop settings.');
-    return res.json({ toolCall: { name: 'navigate', args: { target: 'settings_modal', speech_response: speech } } });
-  }
-  if (lower.includes('search') || raw.includes('सर्च')) {
-    const speech = userLang === 'hindi' ? 'सर्च बार खोल दिया गया है।' : (userLang === 'hinglish' ? 'Search bar open kar diya hai.' : 'Opening search bar.');
-    return res.json({ toolCall: { name: 'navigate', args: { target: 'search_modal', speech_response: speech } } });
-  }
-  if (lower.includes('add customer') || lower.includes('customer form') || raw.includes('नया ग्राहक फॉर्म') || raw.includes('कस्टमर फॉर्म')) {
-    const speech = userLang === 'hindi' ? 'नया ग्राहक जोड़ने का फॉर्म खोल दिया गया है।' : (userLang === 'hinglish' ? 'Naya customer form open kar diya hai.' : 'Opening add customer dialog.');
-    return res.json({ toolCall: { name: 'navigate', args: { target: 'add_customer_modal', speech_response: speech } } });
-  }
-  if (lower.includes('add transaction') || lower.includes('entry form') || lower.includes('cash in') || lower.includes('cash out') || raw.includes('लेनदेन फॉर्म') || raw.includes('एंट्री फॉर्म')) {
-    const speech = userLang === 'hindi' ? 'लेन-देन दर्ज करने का फॉर्म खोल दिया गया है।' : (userLang === 'hinglish' ? 'Transaction entry form open kar diya hai.' : 'Opening transaction dialog.');
-    return res.json({ toolCall: { name: 'navigate', args: { target: 'add_transaction_modal', speech_response: speech } } });
-  }
-  if (lower.includes('add product') || lower.includes('product form') || raw.includes('सामान फॉर्म') || raw.includes('प्रोडक्ट फॉर्म')) {
-    const speech = userLang === 'hindi' ? 'नया सामान जोड़ने का फॉर्म खोल दिया गया है।' : (userLang === 'hinglish' ? 'Product entry form open kar diya hai.' : 'Opening add product dialog.');
-    return res.json({ toolCall: { name: 'navigate', args: { target: 'add_product_modal', speech_response: speech } } });
-  }
-  if (lower.includes('invoice') || lower.includes('receipt') || raw.includes('रसीद') || raw.includes('बिल प्रीव्यू')) {
-    const speech = userLang === 'hindi' ? 'बिल रसीद प्रीव्यू खोल दिया गया है।' : (userLang === 'hinglish' ? 'Invoice preview open kar diya hai.' : 'Opening invoice preview.');
-    return res.json({ toolCall: { name: 'navigate', args: { target: 'invoice_modal', speech_response: speech } } });
-  }
-  if (lower.includes('sidebar') || raw.includes('साइडबार')) {
-    const speech = userLang === 'hindi' ? 'साइडबार बदल दिया गया है।' : (userLang === 'hinglish' ? 'Sidebar toggle kar diya hai.' : 'Sidebar toggled.');
-    return res.json({ toolCall: { name: 'navigate', args: { target: 'toggle_sidebar', speech_response: speech } } });
-  }
-  if (lower.includes('ledger') || lower.includes('khata kholo') || raw.includes('खाता खोलो') || raw.includes('लेजर खोलो')) {
-    const speech = userLang === 'hindi' ? `${custName} का लेजर खोल दिया गया है।` : (userLang === 'hinglish' ? `${custName} ka ledger open kar diya hai.` : `Opening ${custName}'s ledger.`);
-    return res.json({ toolCall: { name: 'navigate', args: { target: 'customer_ledger_modal', customer_name: custName, speech_response: speech } } });
-  }
-  if (lower.includes('customer page') || lower.includes('customers kholo') || lower.includes('show customers') || raw.includes('कस्टमर्स खोलो') || raw.includes('ग्राहक पेज')) {
-    const speech = userLang === 'hindi' ? 'ग्राहक खाता सूची खोल दी गई है।' : (userLang === 'hinglish' ? 'Customers page open kar diya hai.' : 'Opening customers page.');
-    return res.json({ toolCall: { name: 'navigate', args: { target: 'customers', speech_response: speech } } });
-  }
-  if (lower.includes('transaction page') || lower.includes('transactions kholo') || raw.includes('लेनदेन खोलो')) {
-    const speech = userLang === 'hindi' ? 'लेन-देन पासबुक खोल दिया गया है।' : (userLang === 'hinglish' ? 'Transactions page open kar diya hai.' : 'Opening transactions.');
-    return res.json({ toolCall: { name: 'navigate', args: { target: 'transactions', speech_response: speech } } });
-  }
-  if (lower.includes('billing') || raw.includes('बिलिंग खोलो') || lower.includes('bill page')) {
-    const speech = userLang === 'hindi' ? 'बिलिंग पेज खोल दिया गया है।' : (userLang === 'hinglish' ? 'Billing page open kar diya hai.' : 'Opening billing page.');
-    return res.json({ toolCall: { name: 'navigate', args: { target: 'billing', speech_response: speech } } });
-  }
-  if (lower.includes('stock') || raw.includes('स्टॉक खोलो') || lower.includes('inventory')) {
-    const speech = userLang === 'hindi' ? 'स्टॉक और इन्वेंटरी पेज खोल दिया गया है।' : (userLang === 'hinglish' ? 'Stocks page open kar diya hai.' : 'Opening stocks page.');
-    return res.json({ toolCall: { name: 'navigate', args: { target: 'stocks', speech_response: speech } } });
-  }
-  if (lower.includes('home') || lower.includes('dashboard') || raw.includes('होम') || raw.includes('डैशबोर्ड')) {
-    const speech = userLang === 'hindi' ? 'होम डैशबोर्ड खोल दिया गया है।' : (userLang === 'hinglish' ? 'Home dashboard open kar diya hai.' : 'Opening dashboard.');
-    return res.json({ toolCall: { name: 'navigate', args: { target: 'home', speech_response: speech } } });
-  }
-
-  // 3. Identity queries ("Who are you?", "Aap kaun ho?", "आप कौन हैं?")
-  if (lower.includes('who are you') || lower.includes('kaun ho') || lower.includes('kya ho') || lower.includes('kya kar sakte') || raw.includes('कौन हो') || raw.includes('कौन हैं')) {
-    if (userLang === 'hindi') {
-      return res.json({ reply: 'मैं जार्विस हूँ, नोटीबुक का वॉइस असिस्टेंट। मैं आपके ग्राहकों के खाते, दैनिक बिक्री, बिलिंग और उधारी का हिसाब रखने में मदद करता हूँ।' });
-    }
-    if (userLang === 'hinglish') {
-      return res.json({ reply: 'Main Jarvis hoon, NotiBook ka smart voice assistant. Main aapke customers, khata, daily sales, aur udhar manage karne me madad karta hoon.' });
-    }
-    return res.json({ reply: 'I am Jarvis, NotiBook\'s voice assistant. I help you manage customer Khatabooks, record daily sales and expenses, generate bills, and track dues.' });
-  }
-
-  // 4. Total Dues / Market Udhar / Due Customers query
-  if (lower.includes('sabse zyada') || lower.includes('highest') || raw.includes('सबसे ज्यादा') || raw.includes('सबसे ज़्यादा')) {
-    return res.json({ toolCall: { name: 'get_due_customers', args: { filter: 'due' } } });
-  }
-
-  if (
-    lower.includes('payment pending') ||
-    lower.includes('pending payment') ||
-    lower.includes('kitne customer ka') ||
-    lower.includes('kitne customers ka') ||
-    lower.includes('paisa baaki') ||
-    lower.includes('paisa baki') ||
-    lower.includes('udhar baaki') ||
-    lower.includes('udhar baki') ||
-    raw.includes('कितने ग्राहकों का') ||
-    raw.includes('कितने कस्टमर का') ||
-    raw.includes('पैसा बाकी')
-  ) {
-    return res.json({ toolCall: { name: 'get_due_customers', args: { filter: 'due' } } });
-  }
-
-  if (lower.includes('settled') || lower.includes('zero balance') || lower.includes('chukta') || raw.includes('चुकता')) {
-    return res.json({ toolCall: { name: 'get_due_customers', args: { filter: 'settled' } } });
-  }
-
-  if (lower.includes('total udhar') || lower.includes('baki paisa') || lower.includes('market udhar') || lower.includes('market me') || lower.includes('kul udhar') || lower.includes('kul bakaya') || lower.includes('pending dues') || lower.includes('total dues') || lower.includes('sabka udhar') || lower.includes('lena hai') || raw.includes('कुल उधारी') || raw.includes('बाकी पैसा') || raw.includes('कुल बकाया') || raw.includes('लेना है')) {
-    return res.json({ toolCall: { name: 'get_account_balance', args: {} } });
-  }
-
-  // 5. Payment Method queries (UPI, Cash, etc.)
-  if (lower.includes('upi')) {
-    const period = lower.includes('mahine') || lower.includes('month') ? 'month' : (lower.includes('kal') || lower.includes('yesterday') ? 'yesterday' : (lower.includes('hafte') || lower.includes('week') ? 'week' : 'today'));
-    if (lower.includes('kitna') || lower.includes('aaya') || lower.includes('mila') || lower.includes('summary') || lower.includes('transaction') || raw.includes('कितना') || raw.includes('आया')) {
-      return res.json({ toolCall: { name: 'get_payment_method_summary', args: { payment_method: 'UPI', period } } });
-    }
-  }
-
-  if (lower.includes('cash') || raw.includes('कैश') || raw.includes('नकद')) {
-    const period = lower.includes('mahine') || lower.includes('month') ? 'month' : (lower.includes('kal') || lower.includes('yesterday') ? 'yesterday' : (lower.includes('hafte') || lower.includes('week') ? 'week' : 'today'));
-    if (lower.includes('kitna') || lower.includes('aaya') || lower.includes('mila') || lower.includes('summary') || lower.includes('transaction') || raw.includes('कितना') || raw.includes('आया')) {
-      return res.json({ toolCall: { name: 'get_payment_method_summary', args: { payment_method: 'Cash', period } } });
-    }
-  }
-
-  // 5b. Customer count query ("Kitne customer hain", "How many customers")
-  if (lower.includes('kitne customer') || lower.includes('how many customer') || lower.includes('total customer') || lower.includes('sab customer') || raw.includes('कितने ग्राहक') || raw.includes('कितने कस्टमर')) {
-    const count = customers.length;
-    if (userLang === 'hindi') {
-      return res.json({ reply: `नोटीबुक में कुल ${count} ग्राहक जुड़े हुए हैं।` });
-    }
-    if (userLang === 'hinglish') {
-      return res.json({ reply: `NotiBook me total ${count} customers registered hain.` });
-    }
-    return res.json({ reply: `You currently have ${count} customers registered in your NotiBook.` });
-  }
-
-  // 6. Report & Sales queries
-  if (lower.includes('kal kitna') || lower.includes('kal ka report') || lower.includes('kal ki summary') || raw.includes('कल कितना') || raw.includes('कल की रिपोर्ट')) {
-    return res.json({ toolCall: { name: 'get_report', args: { period: 'yesterday' } } });
-  }
-  if (lower.includes('is mahine') || lower.includes('this month') || lower.includes('mahine kitna') || raw.includes('इस महीने') || raw.includes('महीने का')) {
-    return res.json({ toolCall: { name: 'get_report', args: { period: 'month' } } });
-  }
-  if (lower.includes('is hafte') || lower.includes('this week') || lower.includes('hafte ka') || raw.includes('इस हफ्ते') || raw.includes('सप्ताह')) {
-    return res.json({ toolCall: { name: 'get_report', args: { period: 'week' } } });
-  }
-  if (lower.includes('kitna paisa aaya') || lower.includes('kitna paisa gaya') || lower.includes('aaj kitna aaya') || lower.includes('summary') || lower.includes('sales') || lower.includes('bikri') || raw.includes('कितना पैसा आया') || raw.includes('कितना पैसा गया') || raw.includes('बिक्री बताओ') || raw.includes('आज की बिक्री')) {
-    return res.json({ toolCall: { name: 'get_report', args: { period: 'today' } } });
-  }
-
-  // 7. Delete transaction / customer
-  if (lower.includes('delete') || lower.includes('hata do') || lower.includes('hatao') || raw.includes('डिलीट') || raw.includes('हटाओ') || raw.includes('हटा दो')) {
-    let targetDeleteName = custName;
-    for (const c of customers) {
-      if (lower.includes(c.name.toLowerCase())) {
-        targetDeleteName = c.name;
-        break;
-      }
-    }
-    if (lower.includes('customer') || raw.includes('ग्राहक') || raw.includes('कस्टमर')) {
-      return res.json({ toolCall: { name: 'delete_customer', args: { customer_name: targetDeleteName } } });
-    }
-    return res.json({ toolCall: { name: 'delete_transaction', args: { customer_name: targetDeleteName } } });
-  }
-
-  // 8. Robust Multilingual Transaction Intent & Entity Extraction
-  const amountMatch = raw.match(/(?:₹|rs\.?|inr|रुपये|रुपए)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:₹|rs\.?|inr|रुपये|रुपए)?/i);
-  const hasAmount = !!amountMatch;
-  const amount = hasAmount ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0;
-
-  const isDebitIndicator = /\b(udhar|udhari|debit|diya|diye|de\s*do|dedo|dekar|nikasi|gaya)\b|उधर|उधार|उधारी|डेबिट|दिए|दिया|दे\s*दो|देना|काट\s*लो|काटो|माइनस/i.test(raw);
-  const isCreditIndicator = /\b(jama|credit|mila|mili|mile|aaya|aayi|payment|received|jama\s*karo)\b|जमा|क्रेडिट|मिला|मिली|मिले|आया|आई|पेमेंट|पाया/i.test(raw);
-  const isActionVerb = /\b(likh\s*do|likho|likhiye|likh\s*lo|likha|chadha\s*do|chada\s*do|daal\s*do|dalo|add\s*karo|add\s*kar\s*do|add|jo\s*do|jod\s*do|jodo|darj\s*karo|note\s*karo|entry\s*karo|kar\s*do)\b|लिख\s*दो|लिखो|लिखिए|लिख\s*लो|लिखा|चढ़ा\s*दो|चढ़ाओ|डाल\s*दो|डालो|ऐड\s*करो|ऐड\s*कर\s*दो|जोड़ो|जोड़\s*दो|दर्ज\s*करो|दर्ज\s*कर\s*दो|नोट\s*करो|नोट\s*कर\s*दो|एंट्री\s*करो|एंट्री\s*कर\s*दो|कर\s*दो/i.test(raw);
-
-  const isTransactionCommand = (hasAmount && (isDebitIndicator || isCreditIndicator || isActionVerb)) ||
-    lower.includes('add transaction') ||
-    lower.includes('add entry') ||
-    lower.includes('aur 200 aur') ||
-    raw.includes('उधार लिख') ||
-    raw.includes('उधर लिख') ||
-    raw.includes('जमा लिख') ||
-    raw.includes('खाते में') ||
-    raw.includes('अकाउंट में');
-
-  if (isTransactionCommand && hasAmount) {
-    let targetName: string | undefined;
-
-    // Check pronouns first (uske, usmein, usko)
-    const isPronoun = /\b(usmein|usme|uske|uska|uski|unke|unka|unhe|unko|isme|ismein|iska|iski|woh|same\s+customer)\b|उसके|उसमें|उसको|उसका|उसकी|उनके|उनका|इसमें|इसका|इसकी/i.test(raw);
-    if (isPronoun && activeCustomer) {
-      targetName = activeCustomer.name;
-    }
-
-    // Match known customer in server memory
-    if (!targetName) {
-      for (const cust of customers) {
-        if (raw.toLowerCase().includes(cust.name.toLowerCase())) {
-          targetName = cust.name;
-          break;
-        }
-      }
-    }
-
-    // Extract customer name pattern from speech
-    if (!targetName) {
-      const namePatterns = [
-        /(?:^|अरे|जार्विस|भाई|सुनो|please|hey\s+jarvis)?\s*([a-zA-Z\s\u0900-\u097F]+?)\s*(?:के|की|का|ke|ki|ka)\s*(?:अकाउंट|खाते|खाता|account|khata|name|naam)?\s*(?:में|पे|पर|mein|me)/i,
-        /(?:^|अरे|जार्विस|भाई|सुनो|please|hey\s+jarvis)?\s*([a-zA-Z\s\u0900-\u097F]+?)\s*(?:को|se|से|pe|पे|पर)\s*(?:₹|\d+|उधर|उधार|जमा)/i,
-        /(?:to|for|in|naam|नाम|नाम\s*pe|नाम\s*पर)\s+([a-zA-Z\s\u0900-\u097F]+?)(?:'s|\s+ke|\s+के|\s+account|\s+khata|\s+अकाउंट|\s+खाते)?$/i,
-      ];
-      for (const pat of namePatterns) {
-        const match = raw.match(pat);
-        if (match && match[1]) {
-          let extracted = match[1].replace(/^(hey\s+jarvis|jarvis|bhai|are|sun|suno|please|zara|ek|naya|new)\s*/i, '').trim();
-          extracted = extracted.replace(/[0-9₹,\.]+/g, '').trim();
-          const reserved = ['account', 'khata', 'customer', 'grahak', 'khatabook', 'entry', 'balance', 'अकाउंट', 'खाता', 'खाते', 'कस्टमर', 'ग्राहक', 'एंट्री', 'उधार', 'उधर', 'जमा', 'uske', 'usmein'];
-          if (extracted.length >= 2 && !reserved.includes(extracted.toLowerCase())) {
-            targetName = extracted;
-            break;
-          }
-        }
-      }
-    }
-
-    if (!targetName) {
-      targetName = custName;
-    }
-
-    const transactionType: 'credit' | 'debit' = isDebitIndicator ? 'debit' : 'credit';
-    const isCredit = transactionType === 'credit';
-    const speech = userLang === 'hindi'
-      ? `हो गया। ${targetName} के खाते में ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'जमा (क्रेडिट)' : 'उधार (डेबिट)'} जोड़ दिए गए हैं।`
-      : (userLang === 'hinglish'
-        ? `Done. ${targetName} ke account mein ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'jama' : 'udhar'} add kar diya.`
-        : `Done. Added ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'credit' : 'debit'} to ${targetName}'s account.`);
-
-    return res.json({
-      toolCall: {
-        name: 'add_transaction',
-        args: {
-          customer_name: targetName,
-          amount,
-          transaction_type: transactionType,
-          speech_response: speech,
-        },
-      },
-    });
-  }
-
-  // 9. Single Customer Balance queries
-  if (lower.includes('balance') || lower.includes('kitna hai') || lower.includes('baki hai') || raw.includes('बैलेंस') || raw.includes('बकाया')) {
-    const matchedCustomer = customers.find(c => lower.includes(c.name.toLowerCase()) || lower.includes(c.name.split(' ')[0].toLowerCase()));
-    if (matchedCustomer) {
-      return res.json({ toolCall: { name: 'get_balance', args: { customer_name: matchedCustomer.name } } });
-    }
-
-    const words = raw.split(/[^a-zA-Z0-9\u0900-\u097F]+/).filter(Boolean);
-    const ignoreWords = [
-      'what', 'is', 'the', 'of', 'for', 'tell', 'show', 'check', 'get', 'give', 'me', 'please',
-      'ka', 'ki', 'ke', 'ko', 'me', 'mein', 'se', 'balance', 'kitna', 'hai', 'hain', 'tha', 'thi',
-      'batao', 'bataiye', 'बताओ', 'का', 'की', 'के', 'बैलेंस', 'कितना', 'है', 'bata', 'dikhao', 'dekho',
-      'account', 'hisab', 'khata'
-    ];
-    const possibleName = words.find(w => !ignoreWords.includes(w.toLowerCase()));
-    return res.json({ toolCall: { name: 'get_balance', args: { customer_name: possibleName || custName } } });
-  }
-
-  // 10. Last transaction query
-  if (lower.includes('last transaction') || lower.includes('uski last') || lower.includes('pichla') || raw.includes('पिछला लेनदेन')) {
-    return res.json({ toolCall: { name: 'get_transactions', args: { customer_name: custName, limit: 1 } } });
-  }
-
-  // 11. Reminders
-  if (lower.includes('reminder') || raw.includes('रिमाइंडर') || lower.includes('yaad dilao')) {
-    return res.json({ toolCall: { name: 'get_reminders', args: { customer_name: custName } } });
-  }
-
-  // 12. Billing / Invoice inquiry ("Bill kaise banayein", "How to create bill")
-  if (lower.includes('bill kaise') || lower.includes('create invoice') || lower.includes('create a bill') || lower.includes('create bill') || lower.includes('how to bill') || lower.includes('make a bill') || raw.includes('बिल कैसे') || raw.includes('बिल बनाना')) {
-    if (userLang === 'hindi') {
-      return res.json({ reply: 'बिलिंग के लिए आप "बिलिंग खोलो" बोल सकते हैं, या ग्राहक का नाम और सामान बोलकर तुरंत इनवॉइस तैयार कर सकते हैं।' });
-    }
-    if (userLang === 'hinglish') {
-      return res.json({ reply: 'Billing ke liye aap "Billing kholo" bol sakte hain, ya voice command se items add karke turant tax invoice print kar sakte hain.' });
-    }
-    return res.json({ reply: 'To generate a bill, say "Open billing" or dictate items with quantities to create and print an invoice instantly.' });
-  }
-
-  // 13. Gratitude & Pleasantries ("Thank you", "Dhanyawad", "Shukriya")
-  if (lower.includes('thank') || lower.includes('dhanyawad') || lower.includes('shukriya') || raw.includes('धन्यवाद') || raw.includes('शुक्रिया')) {
-    if (userLang === 'hindi') {
-      return res.json({ reply: 'आपका स्वागत है! किसी भी अन्य काम के लिए मुझे बताइए।' });
-    }
-    if (userLang === 'hinglish') {
-      return res.json({ reply: 'You are welcome! Aur kuch update karna ho toh bataiye.' });
-    }
-    return res.json({ reply: 'You are welcome! Let me know if you need anything else.' });
-  }
-
-  // 14. Greetings & Hello
-  if (lower.includes('hello') || lower.includes('hi') || lower.includes('namaste') || lower.includes('hey') || raw.includes('नमस्ते') || raw.includes('नमस्कार')) {
-    if (userLang === 'hindi') {
-      return res.json({ reply: 'नमस्ते! आज मैं आपकी दुकान और खाते में क्या मदद करूँ?' });
-    }
-    if (userLang === 'hinglish') {
-      return res.json({ reply: 'Namaste! Aaj aapke shop aur ledger me kya check karna hai?' });
-    }
-    return res.json({ reply: 'Hello! How can I assist you with your shop ledger or customers today?' });
-  }
-
-  // 15. Clean conversational prompt - strictly NO canned paragraph recitations
-  if (userLang === 'hindi') {
-    return res.json({ reply: 'जी बताइए, क्या एंट्री करनी है?' });
-  }
-  if (userLang === 'hinglish') {
-    return res.json({ reply: 'Haanji, batayein, kya update karna hai?' });
-  }
-  return res.json({ reply: 'Yes, what would you like to update in your ledger?' });
+  return res.json(executionResult);
 });
 
 // WebSocket Server for Gemini Live Real-time Audio

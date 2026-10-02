@@ -8,7 +8,8 @@ import { detectLanguage, UserLanguage, formatLocalizedResponse } from './Languag
 import { 
   resolveCustomerAgainstDatabase, 
   detectFinancialIntent, 
-  cleanExtractedCustomerName 
+  cleanExtractedCustomerName,
+  extractTransactionAmount
 } from './CustomerResolver';
 import { VoiceState } from './types';
 
@@ -236,14 +237,14 @@ export class GeminiLiveManager {
           lang: userLang,
         });
         this.contextManager.setActiveCustomer(res.customer);
-        return args.speech_response || res.responseText;
+        return res.responseText;
       }
 
       if (name === 'get_customer') {
         const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
         const res = await this.actionRouter.getCustomer(custName, userLang);
         this.contextManager.setActiveCustomer(res.customer);
-        return args.speech_response || res.responseText;
+        return res.responseText;
       }
 
       if (name === 'update_customer') {
@@ -255,7 +256,7 @@ export class GeminiLiveManager {
           lang: userLang,
         });
         this.contextManager.setActiveCustomer(res.customer);
-        return args.speech_response || res.responseText;
+        return res.responseText;
       }
 
       if (name === 'delete_customer') {
@@ -269,7 +270,7 @@ export class GeminiLiveManager {
           description: custName,
         });
         this.callbacks.onStateChange?.('WAITING_FOR_CONFIRMATION');
-        return args.speech_response || ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
+        return ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
       }
 
       // 2. BALANCES
@@ -284,28 +285,29 @@ export class GeminiLiveManager {
         }
         const res = await this.actionRouter.getBalance(custName, userLang);
         this.contextManager.setActiveCustomer(res.customer);
-        return args.speech_response || res.statusText;
+        return res.statusText;
       }
 
       if (name === 'get_account_balance') {
         const res = await this.actionRouter.getAccountBalance(userLang);
-        return args.speech_response || res.responseText;
+        return res.responseText;
       }
 
       // 3. TRANSACTIONS
       if (name === 'add_transaction') {
         const custName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
         if (!args.amount) {
+          const isPayment = args.transaction_type === 'credit';
           this.contextManager.setPendingSlotFilling({
             action: 'add_transaction',
-            missingFields: ['amount', !args.transaction_type ? 'transaction_type' : ''].filter(Boolean),
-            gathered: { customerName: custName, transactionType: args.transaction_type },
-            promptQuestion: 'Kitne rupaye?',
+            missingFields: ['amount'],
+            gathered: { customerName: custName, transactionType: args.transaction_type || 'credit' },
+            promptQuestion: isPayment ? 'Kitne rupaye receive hue?' : 'Kitne rupaye ka udhar likhna hai?',
           });
           return formatLocalizedResponse(userLang, {
-            hindi: 'कितने रुपये जोड़ना है?',
-            hinglish: 'Kitne rupaye?',
-            english: 'How much is the amount?',
+            hindi: isPayment ? 'कितने रुपये प्राप्त हुए?' : 'कितने रुपये का उधार लिखना है?',
+            hinglish: isPayment ? 'Kitne rupaye receive hue?' : 'Kitne rupaye ka udhar likhna hai?',
+            english: isPayment ? 'How much was received?' : 'How much credit to record?',
           });
         }
 
@@ -329,7 +331,7 @@ export class GeminiLiveManager {
             type: res.transaction.type === 'in' ? 'credit' : 'debit',
           });
         }
-        return res.responseText || args.speech_response;
+        return res.responseText;
       }
 
       if (name === 'get_transactions') {
@@ -909,17 +911,16 @@ export class GeminiLiveManager {
     }
 
     // 7. Robust Multilingual Transaction Intent & Entity Extraction
-    const amountMatch = raw.match(/(?:₹|rs\.?|inr|रुपये|रुपए)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:₹|rs\.?|inr|रुपये|रुपए)?/i);
-    const hasAmount = !!amountMatch;
-    const amount = hasAmount ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0;
-
+    const { amount, hasAmount } = extractTransactionAmount(raw);
     const financialIntent = detectFinancialIntent(raw);
     const isActionVerb = /\b(likh\s*do|likho|likhiye|likh\s*lo|likha|chadha\s*do|chada\s*do|daal\s*do|dalo|add\s*karo|add\s*kar\s*do|add|jo\s*do|jod\s*do|jodo|darj\s*karo|note\s*karo|entry\s*karo|kar\s*do)\b|लिख\s*दो|लिखो|लिखिए|लिख\s*लो|लिखा|चढ़ा\s*दो|चढ़ाओ|डाल\s*दो|डालो|ऐड\s*करो|ऐड\s*कर\s*दो|जोड़ो|जोड़\s*दो|दर्ज\s*करो|दर्ज\s*कर\s*दो|नोट\s*करो|नोट\s*कर\s*दो|एंट्री\s*करो|एंट्री\s*कर\s*दो|कर\s*दो/i.test(raw);
 
-    const isTransactionCommand = (hasAmount && (financialIntent === 'PAYMENT_RECEIVED' || financialIntent === 'CREDIT_GIVEN' || isActionVerb)) ||
+    const isTransactionCommand = 
+      financialIntent === 'PAYMENT_RECEIVED' ||
+      financialIntent === 'ADD_CUSTOMER_DEBT' ||
+      (hasAmount && isActionVerb) ||
       lower.includes('add transaction') ||
       lower.includes('add entry') ||
-      lower.includes('aur 200 aur') ||
       raw.includes('उधार लिख') ||
       raw.includes('उधर लिख') ||
       raw.includes('जमा लिख') ||
@@ -931,11 +932,12 @@ export class GeminiLiveManager {
       const customerResolution = resolveCustomerAgainstDatabase(raw, allCustomers);
 
       if (customerResolution.status === 'AMBIGUOUS' && customerResolution.candidates && customerResolution.candidates.length > 1) {
-        const candidateNames = customerResolution.candidates.map(c => c.name).join(', ');
+        const candidateNames = customerResolution.candidates.map(c => c.name).join(userLang === 'hindi' ? ' या ' : (userLang === 'english' ? ' or ' : ' ya '));
+        const displayName = customerResolution.searchedName || customerResolution.candidates[0].name.split(' ')[0];
         return formatLocalizedResponse(userLang, {
-          hindi: `${customerResolution.searchedName || 'कस्टमर'} नाम के ${customerResolution.candidates.length} कस्टमर्स मिल रहे हैं (${candidateNames})। आप किस ग्राहक की बात कर रहे हैं?`,
-          hinglish: `${customerResolution.searchedName || 'Customer'} naam ke ${customerResolution.candidates.length} customers mil rahe hain (${candidateNames}). Kis customer ki baat kar rahe hain?`,
-          english: `Found ${customerResolution.candidates.length} customers matching "${customerResolution.searchedName || 'customer'}" (${candidateNames}). Which one do you mean?`,
+          hindi: `${displayName} नाम के ${customerResolution.candidates.length} कस्टमर्स मिल रहे हैं (${candidateNames})। आप किस ${displayName} की बात कर रहे हैं?`,
+          hinglish: `${displayName} naam ke ${customerResolution.candidates.length} customers mil rahe hain (${candidateNames}). Kis ${displayName} ki baat kar rahe hain?`,
+          english: `Found ${customerResolution.candidates.length} customers matching "${displayName}" (${candidateNames}). Which one do you mean?`,
         });
       }
 
@@ -944,7 +946,7 @@ export class GeminiLiveManager {
       // If customer name was mentioned in speech but is NOT found in DB, DO NOT create one automatically!
       if (!targetCustomer && customerResolution.status === 'NOT_FOUND') {
         const cleanName = cleanExtractedCustomerName(customerResolution.searchedName || '');
-        if (cleanName && cleanName.length >= 2 && !['account', 'khata', 'customer', 'entry'].includes(cleanName.toLowerCase())) {
+        if (cleanName && cleanName.length >= 2) {
           return formatLocalizedResponse(userLang, {
             hindi: `"${cleanName}" कस्टमर लिस्ट में नहीं मिल रहे। क्या आप उन्हें नया कस्टमर बनाना चाहते हैं?`,
             hinglish: `"${cleanName}" customer list mein nahi mil rahe. Kya aap unhe naya customer banana chahte hain?`,
@@ -953,25 +955,29 @@ export class GeminiLiveManager {
         }
       }
 
-      if (!hasAmount) {
-        const targetName = targetCustomer?.name || 'खाता';
+      if (!hasAmount || !amount) {
+        const targetName = targetCustomer?.name || 'Customer';
+        const isPayment = financialIntent === 'PAYMENT_RECEIVED';
         this.contextManager.setPendingSlotFilling({
           action: 'add_transaction',
-          missingFields: ['amount', 'transaction_type'],
-          gathered: { customerName: targetName },
-          promptQuestion: 'Kitne rupaye?',
+          missingFields: ['amount'],
+          gathered: { 
+            customerName: targetName, 
+            transactionType: isPayment ? 'credit' : 'debit' 
+          },
+          promptQuestion: isPayment ? 'Kitne rupaye receive hue?' : 'Kitne rupaye ka udhar likhna hai?',
         });
         return formatLocalizedResponse(userLang, {
-          hindi: `${targetCustomer ? targetCustomer.name + ' के खाते में ' : ''}कितने रुपये लिखने हैं?`,
-          hinglish: `${targetCustomer ? targetCustomer.name + ' ke account mein ' : ''}Kitne rupaye likhne hain?`,
-          english: `How much amount to record${targetCustomer ? ' for ' + targetCustomer.name : ''}?`,
+          hindi: isPayment ? 'कितने रुपये प्राप्त हुए?' : 'कितने रुपये का उधार लिखना है?',
+          hinglish: isPayment ? 'Kitne rupaye receive hue?' : 'Kitne rupaye ka udhar likhna hai?',
+          english: isPayment ? 'How much was received?' : 'How much credit to record?',
         });
       }
 
       // Determine transaction type:
       // PAYMENT_RECEIVED (customer pays, "minus karke batao", "aa chuka hai", "de diye", "jama") -> credit (decreases balance)
-      // CREDIT_GIVEN (udhar diya, saman diya, debit) -> debit (increases balance)
-      const transactionType: 'credit' | 'debit' = financialIntent === 'CREDIT_GIVEN' ? 'debit' : 'credit';
+      // ADD_CUSTOMER_DEBT (udhar diya, saman diya, debit) -> debit (increases balance)
+      const transactionType: 'credit' | 'debit' = financialIntent === 'ADD_CUSTOMER_DEBT' ? 'debit' : 'credit';
 
       const res = await this.actionRouter.addTransaction({
         customerNameOrId: targetCustomer ? targetCustomer.name : 'खाता',

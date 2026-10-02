@@ -2,6 +2,7 @@ import { Transaction, PaymentMethod, Customer } from '../types';
 import { apiRequest } from './apiClient';
 import { fetchCustomers } from './customers';
 import { cleanPartyOrCustomerName } from '../voice/LanguageUtils';
+import { resolveCustomerAgainstDatabase } from '../voice/CustomerResolver';
 
 export async function fetchTransactions(): Promise<Transaction[]> {
   try {
@@ -77,12 +78,14 @@ export async function addTransactionApi(tx: {
   localStorage.setItem('notibook_transactions', JSON.stringify(updated));
 
   let updatedCust: Customer | undefined;
-  // Also update customer balance if partyName is provided
+  // Also update customer balance if customer or party is resolved against existing customers
   if (cleanParty && cleanParty !== 'खाता' && cleanParty !== 'Customer' && cleanParty.length >= 2) {
     const customers = await fetchCustomers();
-    const target = customers.find(c => c.name.toLowerCase() === cleanParty.toLowerCase());
-    const delta = isCredit ? -tx.amount : tx.amount;
+    const target = (tx.customerId ? customers.find(c => c.id === tx.customerId) : null) ||
+      resolveCustomerAgainstDatabase(cleanParty, customers).customer;
+
     if (target) {
+      const delta = isCredit ? -tx.amount : tx.amount;
       const updatedBal = target.balance + delta;
       updatedCust = {
         ...target,
@@ -91,19 +94,6 @@ export async function addTransactionApi(tx: {
         lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
       };
       const updatedCustomers = customers.map(c => c.id === target.id ? updatedCust! : c);
-      localStorage.setItem('notibook_customers', JSON.stringify(updatedCustomers));
-    } else {
-      updatedCust = {
-        id: `cust-${Date.now()}`,
-        name: cleanParty,
-        phone: '+91 98000 00000',
-        address: '',
-        balance: delta,
-        status: delta > 0 ? 'due' : delta < 0 ? 'advance' : 'settled',
-        lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
-        createdAt: new Intl.DateTimeFormat('en-CA').format(new Date()),
-      };
-      const updatedCustomers = [updatedCust, ...customers];
       localStorage.setItem('notibook_customers', JSON.stringify(updatedCustomers));
     }
   }
