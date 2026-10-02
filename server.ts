@@ -1344,7 +1344,7 @@ app.post('/api/voice/chat', async (req, res) => {
       plan.entities?.customerName ||
       plan.actions?.find(a => a.action === 'CREATE_CUSTOMER')?.parameters?.customerName ||
       '';
-    const cleanCustName = cleanExtractedCustomerName(rawCustName);
+    const cleanCustName = cleanExtractedCustomerName(rawCustName) || rawCustName.trim();
     if (cleanCustName) {
       const dbMatch = resolveCustomerAgainstDatabase(cleanCustName, customers as any);
       if (dbMatch.customer) {

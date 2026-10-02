@@ -74,7 +74,7 @@ export class SemanticActionPlanner {
     if (this.ai) {
       try {
         const aiPlan = await this.planWithGemini(raw, context, db);
-        if (aiPlan) {
+        if (aiPlan && aiPlan.primaryIntent !== 'UNKNOWN') {
           return this.enrichAndValidateSemanticPlan(raw, aiPlan, context, db);
         }
       } catch (err: any) {
@@ -82,7 +82,11 @@ export class SemanticActionPlanner {
       }
     }
 
-    return this.planWhenOffline(raw, context);
+    const offlinePlan = this.planWhenOffline(raw, context, db);
+    if (offlinePlan.primaryIntent !== 'UNKNOWN') {
+      return this.enrichAndValidateSemanticPlan(raw, offlinePlan, context, db);
+    }
+    return offlinePlan;
   }
 
   /**
@@ -264,11 +268,11 @@ USER UTTERANCE:
 
 Interpret the complete English utterance semantically and return strictly valid JSON.`;
 
-    const candidateModels = ['gemini-3-flash-preview', 'gemini-3.1-flash-lite', 'gemini-3.8-flash'];
+    const candidateModels = ['gemini-3.1-flash-lite', 'gemini-3.8-flash'];
     for (const modelName of candidateModels) {
       try {
         const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Timeout on ${modelName}`)), 8000)
+          setTimeout(() => reject(new Error(`Timeout on ${modelName}`)), 5000)
         );
 
         const generatePromise = this.ai!.models.generateContent({
@@ -655,9 +659,17 @@ Interpret the complete English utterance semantically and return strictly valid 
   }
 
   /**
-   * Minimal offline safety handler when Gemini API is unreachable.
+   * Robust deterministic parser when Gemini API is unreachable or returns unknown.
    */
-  private planWhenOffline(raw: string, context: ConversationContext): SemanticActionPlan {
+  private planWhenOffline(
+    raw: string,
+    context: ConversationContext,
+    _db?: DatabaseSnapshot
+  ): SemanticActionPlan {
+    const text = raw.trim();
+    const lower = text.toLowerCase();
+
+    // 0. Active Confirmation / Cancellation
     if (context.pendingConfirmation) {
       if (isConfirmationUtterance(raw)) {
         return {
@@ -685,6 +697,289 @@ Interpret the complete English utterance semantically and return strictly valid 
           actions: [{ action: 'CANCEL', parameters: {} }],
         };
       }
+    }
+
+    // Helper: parse amount
+    const extractAmount = (str: string): number | null => {
+      const match = str.match(/(?:rs\.?|inr|₹|rupees)?\s*(\d+(?:\.\d+)?)\s*(?:rs\.?|inr|₹|rupees)?/i);
+      if (match && match[1]) {
+        return parseFloat(match[1]);
+      }
+      return parseSpokenIndianAmount(str);
+    };
+
+    // Helper: resolve pronouns against active context
+    const activeCustName = context.activeCustomer?.name || null;
+    const isPronounRef = /\b(his|him|her|their|he|she|this\s+customer|that\s+account|it)\b/i.test(lower);
+
+    // 1. COMPOUND INTENT: "Create a customer [Name] and add [Amount] (rupees) into it / to his account"
+    // e.g. "Create a customer Ramesh and add 1000 rupees into it"
+    // e.g. "Create customer Ramesh and add 1000 to his account"
+    // e.g. "Create Ramesh and add 1000"
+    const compoundMatch =
+      lower.match(/(?:create|add|register|make)\s+(?:a\s+)?(?:new\s+)?customer\s+(?:called\s+|named\s+)?([a-zA-Z\s]+?)\s+(?:and|aur|\&)\s+(?:add|record|put|daal)\s+(.+)/i) ||
+      lower.match(/(?:create|add)\s+([a-zA-Z\s]+?)\s+(?:as\s+(?:a\s+)?customer\s+)?(?:and|aur|\&)\s+(?:add|record|put)\s+(.+)/i);
+
+    if (compoundMatch) {
+      const rawName = compoundMatch[1].trim();
+      const afterAction = compoundMatch[2].trim();
+      const cleanName = cleanExtractedCustomerName(rawName) || rawName.charAt(0).toUpperCase() + rawName.slice(1);
+      const parsedAmt = extractAmount(afterAction);
+
+      if (cleanName && parsedAmt) {
+        return {
+          detectedLanguage: 'english',
+          primaryIntent: 'ADD_RECEIVABLE',
+          userGoalSummary: `Create customer ${cleanName} and add ₹${parsedAmt} receivable`,
+          requiresConfirmation: true,
+          entities: {
+            customerName: cleanName,
+            amount: parsedAmt,
+            transactionType: 'RECEIVABLE',
+          },
+          references: { isPronounOrReference: false, refersTo: 'new_customer', resolvedCustomerName: cleanName },
+          missingInformation: [],
+          ambiguities: [],
+          actions: [
+            {
+              action: 'CREATE_CUSTOMER',
+              parameters: { customerName: cleanName },
+            },
+            {
+              action: 'ADD_RECEIVABLE',
+              parameters: { customerName: cleanName, amount: parsedAmt, usePriorActionResultForCustomerId: true },
+            },
+          ],
+        };
+      }
+    }
+
+    // 2. Standalone CREATE_CUSTOMER: "Create a customer Ramesh", "Add customer Ramesh"
+    const createCustMatch =
+      lower.match(/^(?:create|add|register|new)\s+(?:a\s+)?(?:new\s+)?customer\s+(?:called\s+|named\s+)?([a-zA-Z\s]+)$/i) ||
+      lower.match(/^customer\s+(?:called\s+|named\s+)?([a-zA-Z\s]+)$/i);
+
+    if (createCustMatch && !lower.includes('tab') && !lower.includes('section') && !lower.includes('page')) {
+      const rawName = createCustMatch[1].trim();
+      const cleanName = cleanExtractedCustomerName(rawName) || rawName.charAt(0).toUpperCase() + rawName.slice(1);
+      if (cleanName) {
+        return {
+          detectedLanguage: 'english',
+          primaryIntent: 'CREATE_CUSTOMER',
+          userGoalSummary: `Create new customer ${cleanName}`,
+          requiresConfirmation: false,
+          entities: {
+            customerName: cleanName,
+          },
+          references: { isPronounOrReference: false, refersTo: 'new_customer', resolvedCustomerName: cleanName },
+          missingInformation: [],
+          ambiguities: [],
+          actions: [
+            {
+              action: 'CREATE_CUSTOMER',
+              parameters: { customerName: cleanName },
+            },
+          ],
+        };
+      }
+    }
+
+    // 3. Standalone ADD_RECEIVABLE: "Add 1000 to Ramesh's account", "Ramesh owes me 1000", "Add 1000 to his account"
+    const addRecMatch =
+      lower.match(/(?:add|put|record)\s+(?:a\s+)?(.+?)\s+(?:to|against|in|for)\s+([a-zA-Z\s]+?)(?:'s)?\s*(?:account|ledger)?$/i) ||
+      lower.match(/([a-zA-Z\s]+?)\s+(?:owes\s+(?:me\s+)?|has\s+to\s+pay\s+(?:me\s+)?)(.+)/i);
+
+    if (addRecMatch) {
+      let amtStr = addRecMatch[1].trim();
+      let nameStr = addRecMatch[2].trim();
+
+      if (lower.includes('owes') || lower.includes('has to pay')) {
+        nameStr = addRecMatch[1].trim();
+        amtStr = addRecMatch[2].trim();
+      }
+
+      let targetName = cleanExtractedCustomerName(nameStr);
+      if (!targetName && (isPronounRef || /^(his|him|her|their|it)$/i.test(nameStr))) {
+        targetName = activeCustName || '';
+      }
+      const parsedAmt = extractAmount(amtStr);
+
+      if (targetName && parsedAmt) {
+        return {
+          detectedLanguage: 'english',
+          primaryIntent: 'ADD_RECEIVABLE',
+          userGoalSummary: `Add ₹${parsedAmt} receivable to ${targetName}`,
+          requiresConfirmation: true,
+          entities: {
+            customerName: targetName,
+            amount: parsedAmt,
+            transactionType: 'RECEIVABLE',
+          },
+          references: { isPronounOrReference: Boolean(isPronounRef), refersTo: isPronounRef ? 'active_customer' : 'none', resolvedCustomerName: targetName },
+          missingInformation: [],
+          ambiguities: [],
+          actions: [
+            {
+              action: 'ADD_RECEIVABLE',
+              parameters: { customerName: targetName, amount: parsedAmt },
+            },
+          ],
+        };
+      }
+    }
+
+    // 4. Standalone RECORD_PAYMENT_RECEIVED: "Ramesh paid 500", "Received 500 from Ramesh", "Ramesh gave 500"
+    const paidMatch =
+      lower.match(/([a-zA-Z\s]+?)\s+(?:paid|gave|given|settled)\s+(.+)/i) ||
+      lower.match(/(?:received|got|collected)\s+(.+?)\s+from\s+([a-zA-Z\s]+)/i);
+
+    if (paidMatch) {
+      let nameStr = paidMatch[1].trim();
+      let amtStr = paidMatch[2].trim();
+
+      if (lower.startsWith('received') || lower.startsWith('got') || lower.startsWith('collected')) {
+        amtStr = paidMatch[1].trim();
+        nameStr = paidMatch[2].trim();
+      }
+
+      let targetName = cleanExtractedCustomerName(nameStr);
+      if (!targetName && (isPronounRef || /^(his|him|her|he|she)$/i.test(nameStr))) {
+        targetName = activeCustName || '';
+      }
+      const parsedAmt = extractAmount(amtStr);
+
+      if (targetName && parsedAmt) {
+        return {
+          detectedLanguage: 'english',
+          primaryIntent: 'RECORD_PAYMENT_RECEIVED',
+          userGoalSummary: `Record ₹${parsedAmt} payment received from ${targetName}`,
+          requiresConfirmation: true,
+          entities: {
+            customerName: targetName,
+            amount: parsedAmt,
+            transactionType: 'PAYMENT_RECEIVED',
+          },
+          references: { isPronounOrReference: Boolean(isPronounRef), refersTo: isPronounRef ? 'active_customer' : 'none', resolvedCustomerName: targetName },
+          missingInformation: [],
+          ambiguities: [],
+          actions: [
+            {
+              action: 'RECORD_PAYMENT_RECEIVED',
+              parameters: { customerName: targetName, amount: parsedAmt },
+            },
+          ],
+        };
+      }
+    }
+
+    // 5. Standalone ADD_PAYMENT_GIVEN: "I gave 500 to Ramesh", "Gave 500 to Ramesh"
+    const gaveMatch = lower.match(/(?:i\s+)?(?:gave|paid|handed)\s+(.+?)\s+to\s+([a-zA-Z\s]+)/i);
+    if (gaveMatch) {
+      const amtStr = gaveMatch[1].trim();
+      const nameStr = gaveMatch[2].trim();
+      let targetName = cleanExtractedCustomerName(nameStr);
+      if (!targetName && isPronounRef) targetName = activeCustName || '';
+      const parsedAmt = extractAmount(amtStr);
+
+      if (targetName && parsedAmt) {
+        return {
+          detectedLanguage: 'english',
+          primaryIntent: 'ADD_PAYMENT_GIVEN',
+          userGoalSummary: `Record ₹${parsedAmt} payment given to ${targetName}`,
+          requiresConfirmation: true,
+          entities: {
+            customerName: targetName,
+            amount: parsedAmt,
+            transactionType: 'PAYMENT_GIVEN',
+          },
+          references: { isPronounOrReference: Boolean(isPronounRef), refersTo: isPronounRef ? 'active_customer' : 'none', resolvedCustomerName: targetName },
+          missingInformation: [],
+          ambiguities: [],
+          actions: [
+            {
+              action: 'ADD_PAYMENT_GIVEN',
+              parameters: { customerName: targetName, amount: parsedAmt },
+            },
+          ],
+        };
+      }
+    }
+
+    // 6. Navigation: "Open customers", "Show customer tab", "Go to billing", "Go home", "Open stocks"
+    const navMatch = lower.match(
+      /(?:open|go\s+to|show|take\s+me\s+to|navigate\s+to)\s+(?:the\s+)?(customers?|clients?|parties|billing|invoices?|bills?|transactions?|passbook|daybook|stocks?|inventory|products?|home|dashboard)/i
+    );
+    if (navMatch) {
+      const target = navMatch[1].toLowerCase();
+      let dest = 'home';
+      if (target.includes('cust') || target.includes('client') || target.includes('parti')) dest = 'customers';
+      else if (target.includes('bill') || target.includes('inv')) dest = 'billing';
+      else if (target.includes('tx') || target.includes('trans') || target.includes('pass') || target.includes('day')) dest = 'transactions';
+      else if (target.includes('stock') || target.includes('invent') || target.includes('prod')) dest = 'stocks';
+      else if (target.includes('home') || target.includes('dash')) dest = 'home';
+
+      return {
+        detectedLanguage: 'english',
+        primaryIntent: 'NAVIGATE',
+        userGoalSummary: `Navigate to ${dest}`,
+        requiresConfirmation: false,
+        entities: { page: dest },
+        references: { isPronounOrReference: false, refersTo: 'none' },
+        missingInformation: [],
+        ambiguities: [],
+        actions: [{ action: 'NAVIGATE', parameters: { destination: dest, page: dest } }],
+      };
+    }
+
+    // 7. GET_BALANCE: "Show Ramesh's balance", "What is Ramesh balance", "How much does Ramesh owe"
+    const balMatch = lower.match(
+      /(?:show|check|what\s+is|how\s+much\s+(?:does)?)\s+([a-zA-Z\s]+?)(?:'s)?\s*(?:balance|dues|khata|owe)/i
+    );
+    if (balMatch) {
+      const nameStr = balMatch[1].trim();
+      let targetName = cleanExtractedCustomerName(nameStr);
+      if (!targetName && isPronounRef) targetName = activeCustName || '';
+      if (targetName) {
+        return {
+          detectedLanguage: 'english',
+          primaryIntent: 'GET_BALANCE',
+          userGoalSummary: `Check balance for ${targetName}`,
+          requiresConfirmation: false,
+          entities: { customerName: targetName },
+          references: { isPronounOrReference: Boolean(isPronounRef), refersTo: isPronounRef ? 'active_customer' : 'none', resolvedCustomerName: targetName },
+          missingInformation: [],
+          ambiguities: [],
+          actions: [{ action: 'GET_BALANCE', parameters: { customerName: targetName } }],
+        };
+      }
+    }
+
+    // 8. Total Market summaries
+    if (lower.includes('total receivable') || lower.includes('total dues') || lower.includes('market dues')) {
+      return {
+        detectedLanguage: 'english',
+        primaryIntent: 'GET_TOTAL_RECEIVABLE',
+        userGoalSummary: 'Get total receivables',
+        requiresConfirmation: false,
+        entities: {},
+        references: { isPronounOrReference: false, refersTo: 'none' },
+        missingInformation: [],
+        ambiguities: [],
+        actions: [{ action: 'GET_TOTAL_RECEIVABLE', parameters: {} }],
+      };
+    }
+    if (lower.includes('total payable')) {
+      return {
+        detectedLanguage: 'english',
+        primaryIntent: 'GET_TOTAL_PAYABLE',
+        userGoalSummary: 'Get total payables',
+        requiresConfirmation: false,
+        entities: {},
+        references: { isPronounOrReference: false, refersTo: 'none' },
+        missingInformation: [],
+        ambiguities: [],
+        actions: [{ action: 'GET_TOTAL_PAYABLE', parameters: {} }],
+      };
     }
 
     return {
