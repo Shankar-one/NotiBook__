@@ -7,6 +7,7 @@ import { UserLanguage, PreferredLanguage } from './LanguageUtils';
 export interface VoiceSessionSubscriber {
   onStateChange?: (state: VoiceState) => void;
   onTranscript?: (turn: ConversationTurn) => void;
+  onInterimTranscript?: (text: string) => void;
   onVolumeChange?: (volume: number) => void;
   onJarvisMessage?: (message: string, lang?: UserLanguage) => void;
   onLanguageChange?: (lang: UserLanguage, pref: PreferredLanguage) => void;
@@ -32,6 +33,9 @@ export class VoiceSessionManager {
           const turn: ConversationTurn = { role, text, timestamp: Date.now(), lang };
           this.transcripts.push(turn);
           this.subscribers.forEach((s) => s.onTranscript?.(turn));
+        },
+        onInterimTranscript: (text) => {
+          this.subscribers.forEach((s) => s.onInterimTranscript?.(text));
         },
         onVolumeChange: (vol) => {
           this.currentVolume = vol;
@@ -66,6 +70,9 @@ export class VoiceSessionManager {
         const turn: ConversationTurn = { role, text, timestamp: Date.now(), lang };
         this.transcripts.push(turn);
         this.subscribers.forEach((s) => s.onTranscript?.(turn));
+      },
+      onInterimTranscript: (text) => {
+        this.subscribers.forEach((s) => s.onInterimTranscript?.(text));
       },
       onVolumeChange: (vol) => {
         this.currentVolume = vol;
@@ -108,6 +115,10 @@ export class VoiceSessionManager {
     return this.orchestrator.getCurrentVoiceLanguage();
   }
 
+  public getContextManager() {
+    return this.orchestrator.getContextManager();
+  }
+
   public setLanguage(pref: PreferredLanguage): void {
     this.orchestrator.setLanguagePreference(pref);
   }
@@ -126,6 +137,10 @@ export class VoiceSessionManager {
 
   public async stop(): Promise<void> {
     await this.orchestrator.stopActiveSession();
+  }
+
+  public async commitCurrentSpeech(): Promise<void> {
+    await this.orchestrator.commitCurrentSpeech();
   }
 
   public async toggle(): Promise<void> {

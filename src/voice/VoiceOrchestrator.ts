@@ -16,6 +16,7 @@ import {
 export interface VoiceOrchestratorEvents {
   onStateChange?: (state: VoiceState) => void;
   onTranscript?: (role: 'user' | 'assistant', text: string, lang?: UserLanguage) => void;
+  onInterimTranscript?: (text: string) => void;
   onVolumeChange?: (volume: number) => void;
   onJarvisSpokenText?: (text: string, lang?: UserLanguage) => void;
   onLanguageChange?: (lang: UserLanguage, pref: PreferredLanguage) => void;
@@ -34,6 +35,9 @@ export class VoiceOrchestrator {
   // Speech recognition for continuous voice capture
   private recognition: any = null;
   private isContinuousListening: boolean = false;
+  private isRecognizing: boolean = false;
+  private speechCommitTimer: any = null;
+  private latestHeardText: string = '';
   private currentLanguagePreference: PreferredLanguage = 'auto';
   private currentVoiceLanguage: UserLanguage = 'hinglish';
 
@@ -66,8 +70,8 @@ export class VoiceOrchestrator {
     });
 
     this.wakeWordManager = new WakeWordManager();
-    this.wakeWordManager.setOnWakeWordDetected(() => {
-      this.handleWakeWordTriggered();
+    this.wakeWordManager.setOnWakeWordDetected((rawTranscript?: string) => {
+      this.handleWakeWordTriggered(rawTranscript);
     });
 
     this.initSpeechRecognition();
@@ -89,14 +93,13 @@ export class VoiceOrchestrator {
   }
 
   /**
-   * Unblocks audio context and speech recognition on user interaction,
-   * ensuring browser audio and microphone permissions are unlocked.
+   * Unblocks audio context on user interaction,
+   * ensuring browser audio output and microphone permissions are unlocked.
    */
   private initUserGestureUnblocking() {
     if (typeof window === 'undefined') return;
 
     const unblock = async () => {
-      console.log('[VoiceOrchestrator] User gesture detected: unblocking audio & wake word recognition');
       try {
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
         if (AudioContextClass) {
@@ -107,10 +110,13 @@ export class VoiceOrchestrator {
         }
       } catch {}
 
-      // If in IDLE state, ensure wake word is running
-      if (this.currentState === 'IDLE') {
+      // If in IDLE state and wake word is not active, try arming wake word
+      if (this.currentState === 'IDLE' && !this.wakeWordManager.isListening()) {
         try {
-          await this.wakeWordManager.start();
+          const perm = await AudioManager.checkPermission();
+          if (perm === 'granted') {
+            await this.wakeWordManager.start();
+          }
         } catch {}
       }
     };
@@ -171,7 +177,10 @@ export class VoiceOrchestrator {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-    if (!SpeechRecognition) return;
+    if (!SpeechRecognition) {
+      console.log('[VoiceOrchestrator] Web SpeechRecognition unavailable, will use MediaRecorder + Gemini STT');
+      return;
+    }
 
     try {
       this.recognition = new SpeechRecognition();
@@ -181,7 +190,9 @@ export class VoiceOrchestrator {
 
       this.recognition.onstart = () => {
         this.isContinuousListening = true;
+        this.isRecognizing = true;
         this.setState('LISTENING');
+        console.log('[VoiceOrchestrator] Speech recognition active');
       };
 
       this.recognition.onresult = (event: any) => {
@@ -192,19 +203,38 @@ export class VoiceOrchestrator {
           this.setState('LISTENING');
         }
 
-        let finalTranscript = '';
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) {
-            finalTranscript += event.results[i][0].transcript;
+        let fullFinalText = '';
+        let currentInterimText = '';
+
+        for (let i = 0; i < event.results.length; ++i) {
+          const item = event.results[i];
+          if (item && item[0]) {
+            const part = item[0].transcript || '';
+            if (item.isFinal) {
+              fullFinalText += (fullFinalText ? ' ' : '') + part.trim();
+            } else {
+              currentInterimText += (currentInterimText ? ' ' : '') + part.trim();
+            }
           }
         }
 
-        if (finalTranscript.trim()) {
-          this.handleFinalUserUtterance(finalTranscript.trim());
+        const combined = (fullFinalText + (currentInterimText ? ' ' + currentInterimText : '')).trim();
+
+        if (combined) {
+          this.latestHeardText = combined;
+          this.events.onInterimTranscript?.(combined);
+
+          // Reset silence timer: wait for 2.2 seconds of complete silence after speech ends
+          // This allows users to speak compound sentences with natural pauses without being cut off
+          if (this.speechCommitTimer) clearTimeout(this.speechCommitTimer);
+          this.speechCommitTimer = setTimeout(() => {
+            void this.commitCurrentSpeech();
+          }, 2200);
         }
       };
 
-      this.recognition.onerror = (e: any) => {
+      this.recognition.onerror = async (e: any) => {
+        console.warn('[VoiceOrchestrator] Speech recognition error event:', e.error);
         if (e.error === 'not-allowed') {
           console.warn('[VoiceOrchestrator] Microphone permission not allowed');
           this.setState('ERROR');
@@ -215,16 +245,22 @@ export class VoiceOrchestrator {
                 : 'Microphone permission compulsory hai. Kripya browser mein microphone allow karein.');
           this.events.onJarvisSpokenText?.(errorMsg, this.currentVoiceLanguage);
           this.events.onTranscript?.('assistant', errorMsg, this.currentVoiceLanguage);
-        } else if (e.error !== 'no-speech') {
-          console.warn('[VoiceOrchestrator] Recognition error:', e.error);
+          return;
+        }
+
+        // Fallback to server-side Gemini audio transcription on network or service errors
+        if (e.error === 'network' || e.error === 'service-not-allowed') {
+          console.log('[VoiceOrchestrator] Using server-side Gemini audio transcription fallback...');
+          await this.attemptGeminiAudioTranscription();
         }
       };
 
       this.recognition.onend = () => {
+        this.isRecognizing = false;
         // If we are supposed to be continuously listening in active session, restart
         if (this.isContinuousListening && this.currentState !== 'IDLE' && this.currentState !== 'ERROR' && this.currentState !== 'ENDING') {
           setTimeout(() => {
-            if (this.isContinuousListening && this.recognition) {
+            if (this.isContinuousListening && this.recognition && !this.isRecognizing) {
               try {
                 this.recognition.start();
               } catch {}
@@ -238,26 +274,103 @@ export class VoiceOrchestrator {
   }
 
   /**
+   * Commits the entire voice utterance (from Web Speech API or recorded audio via Gemini)
+   */
+  public async commitCurrentSpeech(): Promise<void> {
+    if (this.speechCommitTimer) {
+      clearTimeout(this.speechCommitTimer);
+      this.speechCommitTimer = null;
+    }
+
+    const textToCommit = this.latestHeardText.trim();
+    this.latestHeardText = '';
+    this.events.onInterimTranscript?.('');
+
+    if (textToCommit) {
+      console.log('[VoiceOrchestrator] Committing full voice utterance:', textToCommit);
+      this.audioManager.resetRecordedAudio();
+      
+      // Momentarily abort and restart recognition so Chrome clears its buffer for the next utterance
+      if (this.recognition) {
+        try {
+          this.recognition.abort();
+        } catch {}
+      }
+
+      await this.handleFinalUserUtterance(textToCommit);
+      return;
+    }
+
+    // Fallback: If Web Speech produced no text, check the audio recorded in MediaRecorder!
+    const transcribed = await this.attemptGeminiAudioTranscription();
+    if (!transcribed && this.isContinuousListening && this.currentState === 'LISTENING') {
+      // Keep listening
+    }
+  }
+
+  /**
+   * Transcribe recorded audio with server-side Gemini STT fallback
+   */
+  private async attemptGeminiAudioTranscription(): Promise<boolean> {
+    const recorded = await this.audioManager.getRecordedAudioBase64();
+    if (recorded && recorded.base64) {
+      this.setState('THINKING');
+      this.events.onInterimTranscript?.(
+        this.currentVoiceLanguage === 'hindi' ? 'पूरा ऑडियो बदला जा रहा है...' : 'Converting whole audio to text...'
+      );
+      const transcript = await this.audioManager.transcribeAudio(
+        recorded.base64,
+        recorded.mimeType,
+        this.currentVoiceLanguage
+      );
+      this.events.onInterimTranscript?.('');
+      this.audioManager.resetRecordedAudio();
+      if (transcript && transcript.trim()) {
+        console.log('[VoiceOrchestrator] Successfully transcribed full audio via Gemini STT:', transcript);
+        await this.handleFinalUserUtterance(transcript.trim());
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Called when "Hey Jarvis" wake word is spoken
    * Requirement: "Main sun raha hu should be hindi accent"
    */
-  private async handleWakeWordTriggered() {
-    console.log('[VoiceOrchestrator] Wake word "Hey Jarvis" activated!');
+  private async handleWakeWordTriggered(rawTranscript?: string) {
+    console.log('[VoiceOrchestrator] Wake word "Hey Jarvis" activated! Opening recording feature immediately. Transcript:', rawTranscript);
     await this.wakeWordManager.stop();
 
-    // Select wake text according to current voice language preference
-    let greetingText = 'Main sun raha hu.';
-    if (this.currentVoiceLanguage === 'hindi') {
-      greetingText = 'हाँ, मैं सुन रहा हूँ।';
-    } else if (this.currentVoiceLanguage === 'english') {
-      greetingText = 'Yes, I am listening.';
-    } else {
-      greetingText = 'Main sun raha hu.';
+    // Play immediate affirmative acoustic chime so user knows recording has started
+    this.audioManager.playWakeChime();
+
+    // Check if user spoke a command alongside "Hey Jarvis" (e.g. "Hey Jarvis, customer tab kholo" or "Hey Jarvis add 1000 into account")
+    let trailingCommand = '';
+    if (rawTranscript) {
+      trailingCommand = rawTranscript.replace(
+        /\b(hey|hay|hi|hello|ok|okay|oye|ae|a|sun|suno|he|ha|haay)?\s*(jarvis|jervis|jarves|javis|jarvish|service|travis|charvis|jahvis|jarvisis|jarvises|jar\s*vis|job\s*is|tarvis|jawis)\b|जार्विस|हे\s*जार्विस|हाय\s*जार्विस|सुनो\s*जार्विस|जारविस|ए\s*जार्विस|सर्विस/gi,
+        ''
+      ).replace(/^[,:.\s]+|[,:.\s]+$/g, '').trim();
     }
 
-    // Small delay to allow audio subsystem to transition cleanly
-    await new Promise((r) => setTimeout(r, 120));
-    await this.startActiveSession(greetingText, 'hindi'); // Force Hindi accent for "Main sun raha hu"
+    // Open the recording feature immediately!
+    await this.startActiveSession();
+
+    if (trailingCommand.length >= 2) {
+      console.log('[VoiceOrchestrator] Direct command detected with wake word:', trailingCommand);
+      await this.handleFinalUserUtterance(trailingCommand);
+      return;
+    }
+
+    // User only said "Hey Jarvis":
+    // Announce "Main sun raha hu." in background while the recording feature is ALREADY ACTIVE AND RECORDING!
+    const greetingText = this.currentVoiceLanguage === 'hindi'
+      ? 'हाँ, मैं सुन रहा हूँ।'
+      : (this.currentVoiceLanguage === 'english' ? 'Yes, I am listening.' : 'Main sun raha hu.');
+    this.events.onJarvisSpokenText?.(greetingText, this.currentVoiceLanguage);
+    this.events.onTranscript?.('assistant', greetingText, this.currentVoiceLanguage);
+    void this.audioManager.speakText(greetingText, 'hindi');
   }
 
   /**
@@ -275,15 +388,26 @@ export class VoiceOrchestrator {
     await this.wakeWordManager.stop();
 
     // Wait a brief tick for microphone device release before reconnecting
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 100));
 
     await this.geminiLive.connect();
 
-    // Start audio volume analysis
+    // Start audio volume analysis with speech presence extender
     try {
       await this.audioManager.startCapture(
         () => {},
-        (vol) => this.events.onVolumeChange?.(vol)
+        (vol) => {
+          this.events.onVolumeChange?.(vol);
+          // If user is actively speaking (vol > 0.08), push the commit timer back by 2.2s
+          if (vol > 0.08 && this.latestHeardText) {
+            if (this.speechCommitTimer) {
+              clearTimeout(this.speechCommitTimer);
+              this.speechCommitTimer = setTimeout(() => {
+                void this.commitCurrentSpeech();
+              }, 2200);
+            }
+          }
+        }
       );
     } catch (err: any) {
       console.warn('[VoiceOrchestrator] Microphone capture failed:', err);
@@ -298,20 +422,24 @@ export class VoiceOrchestrator {
       return;
     }
 
-    // Start continuous speech recognition
+    // Start continuous speech recognition if available in browser
     this.isContinuousListening = true;
-    if (this.recognition) {
+    if (this.recognition && !this.isRecognizing) {
       try {
+        this.recognition.lang = this.currentLanguagePreference === 'english' ? 'en-IN' : 'hi-IN';
         this.recognition.start();
-      } catch {}
+      } catch (e) {
+        console.warn('[VoiceOrchestrator] recognition start warning:', e);
+      }
     }
+
+    // Immediately open recording state
+    this.setState('LISTENING');
 
     if (initialGreeting) {
       const langForGreeting = forceAccentLang || this.currentVoiceLanguage;
       this.events.onTranscript?.('assistant', initialGreeting, this.currentVoiceLanguage);
-      await this.speakAssistantResponse(initialGreeting, langForGreeting);
-    } else {
-      this.setState('LISTENING');
+      void this.speakAssistantResponse(initialGreeting, langForGreeting);
     }
   }
 
@@ -321,19 +449,49 @@ export class VoiceOrchestrator {
   public async stopActiveSession(): Promise<void> {
     console.log('[VoiceOrchestrator] Stopping active session...');
     this.isContinuousListening = false;
-    this.audioManager.interruptPlayback();
-    this.audioManager.stopCapture();
+    if (this.speechCommitTimer) {
+      clearTimeout(this.speechCommitTimer);
+      this.speechCommitTimer = null;
+    }
 
     if (this.recognition) {
+      try {
+        this.recognition.abort();
+      } catch {}
       try {
         this.recognition.stop();
       } catch {}
     }
 
+    this.audioManager.interruptPlayback();
+
+    // If user was actively speaking and had captured text, process the full utterance
+    if (this.latestHeardText.trim()) {
+      const textToProcess = this.latestHeardText.trim();
+      this.latestHeardText = '';
+      this.events.onInterimTranscript?.('');
+      this.audioManager.stopCapture();
+      this.audioManager.resetRecordedAudio();
+      this.geminiLive.disconnect();
+      this.setState('IDLE');
+      await this.handleFinalUserUtterance(textToProcess);
+      this.reArmWakeWord();
+      return;
+    }
+
+    // If Web Speech API didn't produce any text, fallback to Gemini transcription of the whole recorded audio
+    const transcribed = await this.attemptGeminiAudioTranscription();
+    this.audioManager.stopCapture();
+    this.audioManager.resetRecordedAudio();
     this.geminiLive.disconnect();
     this.setState('IDLE');
 
-    // Wait 250ms for microphone hardware release, then reactivate wake word listener for "Hey Jarvis"
+    if (!transcribed) {
+      this.reArmWakeWord();
+    }
+  }
+
+  private reArmWakeWord(): void {
     setTimeout(async () => {
       if (this.currentState === 'IDLE') {
         try {

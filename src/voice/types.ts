@@ -35,58 +35,28 @@ export interface ConversationContext {
     name: string;
     phone?: string;
     balance?: number;
-    address?: string;
-    notes?: string;
   };
-  active_customer?: {
-    id: string;
-    name: string;
-    phone?: string;
-    balance?: number;
-    address?: string;
-    notes?: string;
-  };
-  active_customer_id?: string;
-  last_action?: string;
-  last_created_entity?: {
-    type: 'CUSTOMER' | 'TRANSACTION' | 'REMINDER';
-    id: string;
-    name?: string;
-    amount?: number;
-  };
-  last_transaction?: {
-    id: string;
-    amount: number;
-    type: 'credit' | 'debit';
-    customerId?: string;
-    partyName?: string;
-    date: string;
-  };
-  last_payment?: {
-    id: string;
-    amount: number;
-    customerId?: string;
-    partyName?: string;
-    date: string;
-  };
-  last_query?: string;
-  recentCustomersMentioned?: {
-    id: string;
-    name: string;
-  }[];
-  pending_action?: string | null;
-  pending_field?: string | null;
-  conversation_language?: 'hindi' | 'hinglish' | 'english';
   activeTransaction?: {
     id: string;
     amount?: number;
     description?: string;
     type?: 'credit' | 'debit';
   };
-  lastIntent?: string;
-  lastEntities?: VoiceEntities;
+  lastEntity?: {
+    type: 'customer' | 'transaction' | 'invoice' | 'product';
+    id: string;
+    name: string;
+  };
+  lastAction?: string;
+  lastToolResult?: any;
+  pendingAction?: any;
   pendingConfirmation?: PendingConfirmation;
   pendingSlotFilling?: PendingSlotFilling;
+  pendingField?: string | null;
+  currentPage?: string;
+  detectedLanguage?: 'hindi' | 'hinglish' | 'english';
+  lastIntent?: string;
+  lastEntities?: VoiceEntities;
   recentTurns: ConversationTurn[];
 }
 
@@ -105,6 +75,82 @@ export interface VoiceEntities {
   phone_number?: string;
   page?: 'home' | 'customers' | 'billing' | 'transactions' | 'stocks';
   report_type?: 'today' | 'week' | 'month' | '7days' | 'summary';
+}
+
+export type PlannedActionType =
+  | 'NAVIGATE'
+  | 'CREATE_CUSTOMER'
+  | 'UPDATE_CUSTOMER'
+  | 'DELETE_CUSTOMER'
+  | 'GET_CUSTOMER'
+  | 'GET_CUSTOMER_BALANCE'
+  | 'GET_CUSTOMER_HISTORY'
+  | 'ADD_CUSTOMER_DEBT'
+  | 'RECORD_PAYMENT'
+  | 'GET_ACCOUNT_SUMMARY'
+  | 'CREATE_SALE'
+  | 'MANAGE_STOCK'
+  | 'ADD_REMINDER'
+  | 'GET_REMINDERS'
+  | 'DELETE_TRANSACTION'
+  | 'END_CONVERSATION'
+  | 'ASK_CLARIFICATION';
+
+export interface PlannedAction {
+  action: PlannedActionType;
+  parameters: Record<string, any>;
+  description?: string;
+}
+
+export interface SemanticActionPlan {
+  detectedLanguage: 'hindi' | 'hinglish' | 'english';
+  primaryIntent: string;
+  userGoalSummary: string;
+  entities: {
+    customerName?: string | null;
+    amount?: number | null;
+    paymentMethod?: string | null;
+    navigationTarget?: string | null;
+    productName?: string | null;
+    quantity?: number | null;
+    dueDate?: string | null;
+    note?: string | null;
+    [key: string]: any;
+  };
+  references: {
+    isPronounOrReference: boolean;
+    refersTo: 'active_customer' | 'new_customer' | 'account' | 'none';
+    resolvedCustomerName?: string | null;
+  };
+  missingInformation: string[];
+  ambiguities: string[];
+  clarificationQuestion?: string | null;
+  actions: PlannedAction[];
+}
+
+export interface ExecutionResult {
+  action: PlannedActionType;
+  success: boolean;
+  data?: any;
+  message?: string;
+  error?: string;
+}
+
+export interface VoiceServerResponse {
+  reply: string;
+  plan?: SemanticActionPlan;
+  executionResults?: ExecutionResult[];
+  updatedCustomer?: any;
+  newTransaction?: any;
+  toolCall?: {
+    name: string;
+    args: any;
+  };
+  toolCalls?: Array<{
+    name: string;
+    args: any;
+  }>;
+  updatedContext?: Partial<ConversationContext>;
 }
 
 export type VoiceIntentType =

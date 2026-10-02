@@ -5,6 +5,9 @@ export class AudioManager {
   private processor: ScriptProcessorNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private analyser: AnalyserNode | null = null;
+  private mediaRecorder: MediaRecorder | null = null;
+  private recordedChunks: Blob[] = [];
+  private recordingMimeType: string = 'audio/webm';
   private isCapturing: boolean = false;
   private isPlaying: boolean = false;
   private nextStartTime: number = 0;
@@ -103,7 +106,11 @@ export class AudioManager {
 
       this.source.connect(this.analyser);
       this.analyser.connect(this.processor);
-      this.processor.connect(this.inputAudioCtx.destination);
+      // Mute loopback gain so user does NOT hear delayed audio feedback in their speakers
+      const muteGain = this.inputAudioCtx.createGain();
+      muteGain.gain.value = 0;
+      this.processor.connect(muteGain);
+      muteGain.connect(this.inputAudioCtx.destination);
 
       this.processor.onaudioprocess = (e) => {
         if (!this.isCapturing) return;
@@ -114,6 +121,31 @@ export class AudioManager {
           this.onAudioChunkCallback(base64);
         }
       };
+
+      // Initialize MediaRecorder for high-fidelity audio capture & server transcription
+      this.recordedChunks = [];
+      try {
+        let mime = 'audio/webm;codecs=opus';
+        if (typeof MediaRecorder !== 'undefined' && typeof MediaRecorder.isTypeSupported === 'function') {
+          if (!MediaRecorder.isTypeSupported(mime)) {
+            if (MediaRecorder.isTypeSupported('audio/webm')) mime = 'audio/webm';
+            else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) mime = 'audio/ogg;codecs=opus';
+            else if (MediaRecorder.isTypeSupported('audio/mp4')) mime = 'audio/mp4';
+            else mime = '';
+          }
+        }
+        this.recordingMimeType = mime || 'audio/webm';
+        this.mediaRecorder = mime ? new MediaRecorder(this.mediaStream, { mimeType: mime }) : new MediaRecorder(this.mediaStream);
+        this.mediaRecorder.ondataavailable = (ev) => {
+          if (ev.data && ev.data.size > 0) {
+            this.recordedChunks.push(ev.data);
+          }
+        };
+        this.mediaRecorder.start(250);
+        console.log(`[AudioManager] MediaRecorder capturing (${this.recordingMimeType})`);
+      } catch (recErr) {
+        console.warn('[AudioManager] MediaRecorder fallback unavailable:', recErr);
+      }
 
       if (onVolume) {
         const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
@@ -143,6 +175,12 @@ export class AudioManager {
       clearInterval(this.volumeInterval);
       this.volumeInterval = undefined;
     }
+    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+      try {
+        this.mediaRecorder.stop();
+      } catch {}
+      this.mediaRecorder = null;
+    }
     if (this.mediaStream) {
       this.mediaStream.getTracks().forEach((t) => t.stop());
       this.mediaStream = null;
@@ -162,6 +200,77 @@ export class AudioManager {
     if (this.inputAudioCtx) {
       this.inputAudioCtx.close().catch(() => {});
       this.inputAudioCtx = null;
+    }
+  }
+
+  /**
+   * Retrieves the recorded audio as base64 string
+   */
+  public async getRecordedAudioBase64(): Promise<{ base64: string; mimeType: string } | null> {
+    if (this.recordedChunks.length === 0) return null;
+    try {
+      const blob = new Blob(this.recordedChunks, { type: this.recordingMimeType });
+      if (blob.size < 500) return null;
+      const buffer = await blob.arrayBuffer();
+      const base64 = this.arrayBufferToBase64(buffer);
+      return { base64, mimeType: this.recordingMimeType };
+    } catch {
+      return null;
+    }
+  }
+
+  public resetRecordedAudio(): void {
+    this.recordedChunks = [];
+  }
+
+  /**
+   * Transcribe recorded audio with server-side Gemini 3.8 Flash
+   */
+  public async transcribeAudio(base64Audio: string, mimeType: string = 'audio/webm', language?: string): Promise<string> {
+    try {
+      const res = await fetch('/api/voice/transcribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audioData: base64Audio,
+          mimeType,
+          language,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return (data.transcript || '').trim();
+      }
+    } catch (err) {
+      console.warn('[AudioManager] Transcription API error:', err);
+    }
+    return '';
+  }
+
+  /**
+   * Play an immediate pleasant acoustic wake chime (D5 -> A5 ascending tone)
+   * notifying the user that Jarvis has woken up and is actively listening.
+   */
+  public playWakeChime(): void {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      const now = ctx.currentTime;
+      osc.frequency.setValueAtTime(587.33, now); // D5
+      osc.frequency.exponentialRampToValueAtTime(880, now + 0.1); // A5
+      gain.gain.setValueAtTime(0.2, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+
+      osc.start(now);
+      osc.stop(now + 0.23);
+    } catch (e) {
+      console.warn('[AudioManager] Wake chime error:', e);
     }
   }
 
@@ -228,9 +337,9 @@ export class AudioManager {
   }
 
   /**
-   * Speak text with natural prosody and authentic neural voices.
-   * Cleans currency symbols ("₹" -> "rupaye" / "rupees") and UI labels
-   * so speech sounds human and conversational rather than robotic.
+   * Speak text using Web Speech API synthesis as reliable instant voice layer.
+   * Special instruction requirement: "Main sun raha hu should be hindi accent".
+   * For Hindi/Hinglish speech, selects authentic Hindi/Indian accent voices.
    */
   public speakText(
     text: string,
@@ -249,81 +358,61 @@ export class AudioManager {
       window.speechSynthesis.cancel();
 
       const voices = this.getVoices();
-      let cleanText = text.trim();
-
-      // Strip UI labels like "JARVIS:", "जार्विस:", "Voice Language:", etc.
-      cleanText = cleanText.replace(/^(?:jarvis|जार्विस|assistant|ai)\s*[:\-]\s*/i, '');
-      cleanText = cleanText.replace(/^(?:voice\s+language|detected\s+language)\s*[:\-]\s*/i, '');
-
-      const isDevanagari = /[\u0900-\u097F]/.test(cleanText);
-      const isHindi = lang === 'hindi' || isDevanagari;
-      const isEnglish = lang === 'english' && !isDevanagari;
-      const isHinglish = !isHindi && !isEnglish;
-
-      // Normalize currency symbol to spoken words so TTS doesn't say "Indian rupee sign"
-      if (isEnglish) {
-        cleanText = cleanText.replace(/₹\s*([0-9,]+(?:\.[0-9]+)?)/g, '$1 rupees');
-        cleanText = cleanText.replace(/Rs\.?\s*([0-9,]+(?:\.[0-9]+)?)/gi, '$1 rupees');
-      } else {
-        cleanText = cleanText.replace(/₹\s*([0-9,]+(?:\.[0-9]+)?)/g, '$1 rupaye');
-        cleanText = cleanText.replace(/Rs\.?\s*([0-9,]+(?:\.[0-9]+)?)/gi, '$1 rupaye');
-      }
+      const lowerText = text.toLowerCase().trim();
 
       // Check if text is "Main sun raha hu" or variants
-      const lowerText = cleanText.toLowerCase();
       const isMainSunRahaHu = 
         lowerText.includes('main sun raha') || 
         lowerText.includes('sun raha hu') || 
         lowerText.includes('sun raha hoon') ||
-        cleanText.includes('सुन रहा हूँ') ||
-        cleanText.includes('सुन रहा हूं');
+        text.includes('सुन रहा हूँ') ||
+        text.includes('सुन रहा हूं');
 
+      const isDevanagari = /[\u0900-\u097F]/.test(text);
+      const isHindi = lang === 'hindi' || isDevanagari || isMainSunRahaHu;
+      const isEnglish = lang === 'english' && !isDevanagari && !isMainSunRahaHu;
+      const isHinglish = !isHindi && !isEnglish;
+
+      // Find the best voice with Hindi accent
       let chosenVoice: SpeechSynthesisVoice | undefined;
       let targetLang = 'hi-IN';
-      let spokenUtteranceText = cleanText;
+      let spokenUtteranceText = text;
 
-      // Find Neural / Natural Hindi voices
-      const hindiNaturalVoices = voices.filter(v =>
-        v.lang.startsWith('hi') ||
-        v.name.toLowerCase().includes('hindi') ||
-        v.name.toLowerCase().includes('swara') ||
-        v.name.toLowerCase().includes('madhur') ||
-        v.name.toLowerCase().includes('lekha')
+      // Find Hindi native voices
+      const hindiVoice = voices.find(
+        (v) =>
+          v.lang.startsWith('hi') ||
+          v.name.toLowerCase().includes('hindi') ||
+          v.name.toLowerCase().includes('lekha') ||
+          v.name.toLowerCase().includes('kalpana') ||
+          v.name.toLowerCase().includes('swara') ||
+          v.name.toLowerCase().includes('madhur')
       );
-      // Prefer Microsoft Online (Natural) or Google
-      const hindiVoice = hindiNaturalVoices.find(v => v.name.includes('Natural') || v.name.includes('Online')) ||
-                         hindiNaturalVoices.find(v => v.name.includes('Google')) ||
-                         hindiNaturalVoices[0];
 
-      // Find Neural / Natural Indian English voices
-      const indianNaturalVoices = voices.filter(v =>
-        v.lang === 'en-IN' ||
-        v.name.toLowerCase().includes('india') ||
-        v.name.toLowerCase().includes('neerja') ||
-        v.name.toLowerCase().includes('prabhat')
+      // Find Indian English voices (natural Indian accent)
+      const indianVoice = voices.find(
+        (v) =>
+          v.lang === 'en-IN' ||
+          v.name.toLowerCase().includes('india') ||
+          v.name.toLowerCase().includes('neerja') ||
+          v.name.toLowerCase().includes('prabhat') ||
+          v.name.toLowerCase().includes('ravi') ||
+          v.name.toLowerCase().includes('heera')
       );
-      const indianVoice = indianNaturalVoices.find(v => v.name.includes('Natural') || v.name.includes('Online')) ||
-                          indianNaturalVoices.find(v => v.name.includes('Google')) ||
-                          indianNaturalVoices[0];
-
-      // Find Natural English voices
-      const englishNaturalVoices = voices.filter(v => v.lang.startsWith('en'));
-      const englishVoice = englishNaturalVoices.find(v => v.name.includes('Natural') || v.name.includes('Online')) ||
-                           englishNaturalVoices.find(v => v.lang === 'en-IN') ||
-                           englishNaturalVoices.find(v => v.name.includes('Google')) ||
-                           englishNaturalVoices[0];
 
       if (isMainSunRahaHu) {
         // "Main sun raha hu should be hindi accent"
         targetLang = 'hi-IN';
         if (hindiVoice) {
           chosenVoice = hindiVoice;
+          // Native Hindi speech engines pronounce Devanagari flawlessly in Hindi accent
           spokenUtteranceText = 'मैं सुन रहा हूँ।';
         } else if (indianVoice) {
           chosenVoice = indianVoice;
           targetLang = 'en-IN';
           spokenUtteranceText = 'Main sun raha hu.';
         } else {
+          // If no specific Hindi/Indian voice, still set lang to hi-IN
           targetLang = 'hi-IN';
           spokenUtteranceText = 'मैं सुन रहा हूँ';
         }
@@ -331,17 +420,27 @@ export class AudioManager {
         targetLang = 'hi-IN';
         chosenVoice = hindiVoice || indianVoice;
       } else if (isHinglish) {
-        targetLang = indianVoice ? 'en-IN' : 'hi-IN';
+        // Hinglish uses Indian accent voice
+        targetLang = 'hi-IN';
         chosenVoice = indianVoice || hindiVoice;
+        if (!chosenVoice) {
+          targetLang = 'en-IN';
+        }
       } else {
+        // English voice
         targetLang = 'en-US';
-        chosenVoice = englishVoice;
+        const engVoice = voices.find(
+          (v) =>
+            v.lang === 'en-IN' || // Prefer clear Indian English if available, or natural US English
+            (v.lang.startsWith('en') && (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Samantha') || v.name.includes('Jenny'))) ||
+            v.lang.startsWith('en')
+        );
+        chosenVoice = engVoice;
       }
 
       const utterance = new SpeechSynthesisUtterance(spokenUtteranceText);
-      // Conversational pacing: slightly brisk (1.05) and pleasant pitch (1.02)
-      utterance.rate = 1.05;
-      utterance.pitch = 1.02;
+      utterance.rate = 1.0;
+      utterance.pitch = 1.0;
       utterance.lang = targetLang;
       if (chosenVoice) {
         utterance.voice = chosenVoice;

@@ -120,6 +120,15 @@ export default function App() {
     localStorage.setItem('notibook_invoices', JSON.stringify(invoices));
   }, [invoices]);
 
+  // Synchronize UI page and active customer into voice context manager
+  useEffect(() => {
+    const page = activeTab === 'book' ? activeBookSubtab : activeTab;
+    voiceSession.getContextManager().setCurrentPage(page);
+    if (selectedCustomerForLedger) {
+      voiceSession.getContextManager().setActiveCustomer(selectedCustomerForLedger);
+    }
+  }, [activeTab, activeBookSubtab, selectedCustomerForLedger]);
+
   // Refs for callbacks
   const customersRef = React.useRef(customers);
   customersRef.current = customers;
@@ -449,6 +458,16 @@ export default function App() {
       },
     });
   }, []);
+
+  // Keep voice context in sync with UI screen and active customer
+  useEffect(() => {
+    const cm = voiceSession.getContextManager();
+    const currentPage = activeTab === 'book' ? activeBookSubtab : activeTab;
+    cm.setCurrentPage(currentPage);
+    if (selectedCustomerForLedger) {
+      cm.setActiveCustomer(selectedCustomerForLedger);
+    }
+  }, [activeTab, activeBookSubtab, selectedCustomerForLedger]);
 
   // Sync trigger
   const handleSync = async () => {

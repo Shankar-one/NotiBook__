@@ -29,6 +29,8 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
   const [volume, setVolume] = useState<number>(0);
   const [lastMessage, setLastMessage] = useState<string>('');
   const [lastUserUtterance, setLastUserUtterance] = useState<string>('');
+  const [interimTranscript, setInterimTranscript] = useState<string>('');
+  const [typedCommand, setTypedCommand] = useState<string>('');
   const [currentLang, setCurrentLang] = useState<UserLanguage>('hinglish');
   const [langPref, setLangPref] = useState<PreferredLanguage>('auto');
   const [isWakeWordActive, setIsWakeWordActive] = useState<boolean>(true);
@@ -48,6 +50,7 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
           setExpanded(true);
         } else {
           setExpanded(false);
+          setInterimTranscript('');
         }
       },
       onTranscript: (turn: ConversationTurn) => {
@@ -56,9 +59,13 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
         }
         if (turn.role === 'user') {
           setLastUserUtterance(turn.text);
+          setInterimTranscript('');
         } else if (turn.role === 'assistant') {
           setLastMessage(turn.text);
         }
+      },
+      onInterimTranscript: (text) => {
+        setInterimTranscript(text);
       },
       onVolumeChange: (vol) => {
         setVolume(vol);
@@ -149,19 +156,33 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
       return currentLang === 'hindi' ? '⚠️ माइक्रोफ़ोन अनुमति अनिवार्य' : (currentLang === 'english' ? '⚠️ Microphone Access Compulsory' : '⚠️ Microphone Access Compulsory');
     }
     // IDLE
-    if (currentLang === 'hindi') {
-      return isWakeWordActive ? '🎙️ "हे जार्विस" बोलें (वेक वर्ड सक्रिय)' : '🎙️ "हे जार्विस" बोलें';
+    if (isWakeWordActive) {
+      if (currentLang === 'hindi') return '🎙️ "हे जार्विस" बोलें (वेक वर्ड सक्रिय)';
+      if (currentLang === 'english') return '🎙️ Say "Hey Jarvis" (Listening)';
+      return '🎙️ Say "Hey Jarvis" (Listening)';
+    } else {
+      if (currentLang === 'hindi') return '🎙️ "हे जार्विस" चालू करने के लिए टैप करें';
+      if (currentLang === 'english') return '🎙️ Tap to Enable "Hey Jarvis"';
+      return '🎙️ Tap to Enable "Hey Jarvis"';
     }
-    if (currentLang === 'english') {
-      return isWakeWordActive ? '🎙️ Say "Hey Jarvis" (Wake Word Active)' : '🎙️ Say "Hey Jarvis"';
-    }
-    return isWakeWordActive ? '🎙️ Say "Hey Jarvis" (Wake Word Active)' : '🎙️ Say "Hey Jarvis"';
   };
 
   // Localized Subtitles based on voice language
   const getSublineText = (): string => {
     if (voiceState === 'ERROR') {
       return currentLang === 'hindi' ? 'माइक्रोफ़ोन अनुमति आवश्यक है — अनुमति देने के लिए क्लिक करें' : 'Microphone permission is required — Click to allow';
+    }
+    if (interimTranscript) {
+      return `🎙️ "${interimTranscript}"`;
+    }
+    if (voiceState === 'LISTENING') {
+      if (currentLang === 'hindi') {
+        return 'पूरा वाक्य बोलें... फिर 2 सेकंड रुकें या "पूरा हुआ" दबाएं';
+      }
+      if (currentLang === 'english') {
+        return 'Speak your full request... pause or tap Done';
+      }
+      return 'Speak full sentence... pause or tap Done';
     }
     if (voiceState === 'SPEAKING') {
       return lastMessage;
@@ -197,7 +218,16 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
         <div className="flex items-center justify-between p-3.5 gap-3">
           {/* Status Icon & Label */}
           <div 
-            onClick={() => setExpanded(!expanded)}
+            onClick={async () => {
+              if (voiceState === 'IDLE' && !isWakeWordActive) {
+                const req = await voiceSession.requestMicPermission();
+                if (req.granted) {
+                  await voiceSession.enableWakeWord();
+                  setIsWakeWordActive(voiceSession.isWakeWordListening());
+                }
+              }
+              setExpanded(!expanded);
+            }}
             className="flex items-center gap-2.5 flex-1 min-w-0 cursor-pointer select-none"
             role="button"
             tabIndex={0}
@@ -256,6 +286,20 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
 
           {/* Action Buttons */}
           <div className="flex items-center gap-1.5 shrink-0">
+            {voiceState === 'LISTENING' && (
+              <button
+                onClick={async () => {
+                  await voiceSession.commitCurrentSpeech();
+                }}
+                className="px-2 py-1 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1 transition-all shadow-md shadow-emerald-950/40 cursor-pointer"
+                title="Finish speaking and process entire utterance"
+                aria-label="Process speech"
+              >
+                <CheckCircle size={14} className="text-white" />
+                <span className="text-[11px] font-bold hidden sm:inline">{currentLang === 'hindi' ? 'पूरा हुआ' : 'Done'}</span>
+              </button>
+            )}
+
             {voiceState !== 'IDLE' && (
               <button
                 onClick={handleStop}
@@ -311,26 +355,86 @@ export const JarvisHUD: React.FC<JarvisHUDProps> = ({ onNavigateToTab }) => {
         {/* Expanded Panel: Dialogue History + Language Controls + Developer Test Mode */}
         {expanded && (
           <div className="p-3.5 bg-black/40 border-t border-slate-800/90 space-y-3 text-xs">
-            {/* Automatic Language Detection Status Indicator (Read-Only Status Badge) */}
-            <div className="flex items-center justify-between gap-1 p-2 bg-slate-900/90 rounded-xl border border-slate-800">
-              <span className="text-[11px] font-semibold text-slate-400 flex items-center gap-1.5 pl-1">
-                <Globe size={13} className="text-[#E85D43]" />
-                <span>Language Detected:</span>
+            {/* Quick Language Selector inside HUD */}
+            <div className="flex items-center justify-between gap-1 p-1 bg-slate-900/90 rounded-xl border border-slate-800">
+              <span className="text-[10px] font-semibold text-slate-400 pl-2 flex items-center gap-1">
+                <Globe size={11} className="text-[#E85D43]" />
+                <span>Voice Language:</span>
               </span>
               <div className="flex items-center gap-1">
-                <div className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-[#E85D43]/20 border border-[#E85D43]/50 text-[#E85D43] flex items-center gap-1.5 shadow-xs">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                  <span className="text-slate-300">Auto</span>
-                  <span className="text-slate-500">•</span>
-                  <span className="font-extrabold text-white">
-                    {currentLang === 'hindi' ? 'हिन्दी (Hindi)' : (currentLang === 'english' ? 'English' : 'Hinglish')}
-                  </span>
-                </div>
+                <button
+                  onClick={() => handleSetLanguage('english')}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                    langPref === 'english' || (langPref === 'auto' && currentLang === 'english')
+                      ? 'bg-[#E85D43] text-white shadow-xs'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                  }`}
+                >
+                  English
+                </button>
+                <button
+                  onClick={() => handleSetLanguage('hinglish')}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                    langPref === 'hinglish' || (langPref === 'auto' && currentLang === 'hinglish')
+                      ? 'bg-[#E85D43] text-white shadow-xs'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                  }`}
+                >
+                  Hinglish
+                </button>
+                <button
+                  onClick={() => handleSetLanguage('hindi')}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                    langPref === 'hindi' || (langPref === 'auto' && currentLang === 'hindi')
+                      ? 'bg-[#E85D43] text-white shadow-xs'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                  }`}
+                >
+                  हिन्दी
+                </button>
               </div>
             </div>
 
+            {/* Quick Command Input (Voice & Text Dual Input) */}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (typedCommand.trim()) {
+                  handleSimulateUtterance(typedCommand.trim());
+                  setTypedCommand('');
+                }
+              }}
+              className="flex items-center gap-1.5 p-1 bg-slate-900/90 rounded-xl border border-slate-800 focus-within:border-[#E85D43]/60 transition-colors"
+            >
+              <input
+                type="text"
+                value={typedCommand}
+                onChange={(e) => setTypedCommand(e.target.value)}
+                placeholder={currentLang === 'hindi' ? 'कमांड बोलें या यहाँ टाइप करें...' : 'Speak command or type here...'}
+                className="flex-1 bg-transparent px-2.5 py-1 text-xs text-white placeholder-slate-500 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={!typedCommand.trim()}
+                className="p-1.5 rounded-lg bg-[#E85D43] hover:bg-[#D94E34] disabled:opacity-40 disabled:hover:bg-[#E85D43] text-white transition-all cursor-pointer"
+                title="Send command to Jarvis"
+              >
+                <ArrowRight size={13} />
+              </button>
+            </form>
+
             {/* Active Dialogue Turns */}
             <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+              {interimTranscript && (
+                <div className="flex items-start gap-2 p-2 rounded-xl bg-[#E85D43]/20 border border-[#E85D43]/50 text-amber-200 animate-pulse">
+                  <span className="font-bold text-[#E85D43] shrink-0 text-[11px] uppercase tracking-wider flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#E85D43] animate-ping" />
+                    {currentLang === 'hindi' ? 'सुन रहा हूँ:' : 'Listening:'}
+                  </span>
+                  <span className="text-white font-medium italic">"{interimTranscript}..."</span>
+                </div>
+              )}
+
               {lastUserUtterance && (
                 <div className="flex items-start gap-2 p-2 rounded-xl bg-slate-900/80 border border-slate-800">
                   <span className="font-bold text-[#E85D43] shrink-0 text-[11px] uppercase tracking-wider">
