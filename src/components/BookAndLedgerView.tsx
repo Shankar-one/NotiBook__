@@ -28,6 +28,7 @@ interface BookAndLedgerViewProps {
   isPopulatedState: boolean;
   onTogglePopulatedState: () => void;
   onExportBook: () => void;
+  onDeleteTransaction?: (id: string) => void;
 }
 
 export const BookAndLedgerView: React.FC<BookAndLedgerViewProps> = ({
@@ -48,6 +49,7 @@ export const BookAndLedgerView: React.FC<BookAndLedgerViewProps> = ({
   isPopulatedState,
   onTogglePopulatedState,
   onExportBook,
+  onDeleteTransaction,
 }) => {
   return (
     <div className="max-w-5xl mx-auto space-y-6 pb-12">
@@ -134,6 +136,7 @@ export const BookAndLedgerView: React.FC<BookAndLedgerViewProps> = ({
           onOpenAddTransaction={onOpenAddTransaction}
           isPopulatedState={isPopulatedState}
           onTogglePopulatedState={onTogglePopulatedState}
+          onDeleteTransaction={onDeleteTransaction}
         />
       )}
 

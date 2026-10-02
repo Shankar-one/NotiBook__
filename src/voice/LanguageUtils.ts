@@ -151,3 +151,16 @@ export const LocalizedClarifications = {
       english: `Sorry, this action could not be completed: ${details}`,
     }),
 };
+
+/**
+ * Sanitizes and cleans customer or party names from conversational utterances or voice transcripts.
+ */
+export function cleanPartyOrCustomerName(name: string): string {
+  if (!name) return '';
+  let cleaned = name.trim();
+  cleaned = cleaned.replace(/^(?:अरे|जार्विस|भाई|सुनो|please|hey\s+jarvis|customer|grahak|naya|new|mr\.?|shri|mrs\.?)\s+/i, '');
+  cleaned = cleaned.replace(/\s+(?:ke\s+khate\s+me|ke\s+account\s+me|ka\s+khata|ke\s+khate|ke|ki|ka|ko|se|pe|ji|bhai|bhaiya|saheb)$/i, '');
+  cleaned = cleaned.replace(/\s+(?:के\s+खाते\s+में|के\s+खाते|के\s+अकाउंट\s+में|का\s+खाता|के|की|का|को|से|पे|पर|जी|भाई|साहब)$/i, '');
+  return cleaned.trim();
+}
+

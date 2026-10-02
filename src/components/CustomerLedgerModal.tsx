@@ -9,7 +9,10 @@ import {
   CheckCircle2, 
   Receipt,
   Eye,
-  FileText
+  FileText,
+  Trash2,
+  Edit2,
+  Check
 } from 'lucide-react';
 import { Customer, CustomerTransaction, Invoice, ShopSettings } from '../types';
 
@@ -22,6 +25,9 @@ interface CustomerLedgerModalProps {
   onAddCustomerTx: (customerId: string, type: 'gave' | 'got', amount: number, note: string) => void;
   onSendWhatsappReminder: (customer: Customer) => void;
   onViewInvoice?: (invoice: Invoice) => void;
+  onDeleteTransaction?: (txId: string) => void;
+  onDeleteCustomer?: (customerId: string) => void;
+  onUpdateCustomer?: (customer: Customer) => void;
   settings: ShopSettings;
 }
 
@@ -34,12 +40,21 @@ export const CustomerLedgerModal: React.FC<CustomerLedgerModalProps> = ({
   onAddCustomerTx,
   onSendWhatsappReminder,
   onViewInvoice,
+  onDeleteTransaction,
+  onDeleteCustomer,
+  onUpdateCustomer,
   settings,
 }) => {
   const [activeTab, setActiveTab] = useState<'ledger' | 'invoices'>('ledger');
   const [showAddForm, setShowAddForm] = useState<'gave' | 'got' | null>(null);
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
+  const [confirmDeleteCustomer, setConfirmDeleteCustomer] = useState(false);
+  const [deletingTxId, setDeletingTxId] = useState<string | null>(null);
+  const [isEditingCustomer, setIsEditingCustomer] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+  const [editAddress, setEditAddress] = useState('');
 
   if (!isOpen || !customer) return null;
 
@@ -78,30 +93,128 @@ export const CustomerLedgerModal: React.FC<CustomerLedgerModalProps> = ({
         {/* Header */}
         <div>
           <div className="flex items-start justify-between">
-            <div className="flex items-center gap-3">
-              <div className="flex items-center justify-center w-12 h-12 rounded-2xl bg-[#FFEFEA] text-[#E85D43] font-bold text-base">
-                {customer.name.split(' ').map(w => w[0]).join('').slice(0, 2)}
-              </div>
-              <div>
-                <h2 className="text-lg font-bold text-[#1E232A]">{customer.name}</h2>
-                <div className="flex items-center gap-2 text-xs text-[#8C827A] mt-0.5">
-                  <span>{customer.phone}</span>
-                  {customer.address && (
-                    <>
-                      <span>•</span>
-                      <span>{customer.address}</span>
-                    </>
-                  )}
+            {isEditingCustomer ? (
+              <div className="flex-1 space-y-2 pr-4">
+                <input
+                  type="text"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  placeholder="Customer Name"
+                  className="w-full text-sm font-bold text-[#1E232A] px-2.5 py-1.5 rounded-xl border border-[#EFE9DF] bg-[#FAF7F2] focus:outline-none focus:border-[#E85D43]"
+                />
+                <div className="flex gap-2">
+                  <input
+                    type="tel"
+                    value={editPhone}
+                    onChange={(e) => setEditPhone(e.target.value)}
+                    placeholder="Mobile (+91...)"
+                    className="w-1/2 text-xs text-[#1E232A] px-2.5 py-1 rounded-xl border border-[#EFE9DF] bg-[#FAF7F2] focus:outline-none focus:border-[#E85D43]"
+                  />
+                  <input
+                    type="text"
+                    value={editAddress}
+                    onChange={(e) => setEditAddress(e.target.value)}
+                    placeholder="Address / Area"
+                    className="w-1/2 text-xs text-[#1E232A] px-2.5 py-1 rounded-xl border border-[#EFE9DF] bg-[#FAF7F2] focus:outline-none focus:border-[#E85D43]"
+                  />
                 </div>
               </div>
-            </div>
+            ) : (
+              <div className="flex items-center gap-3">
+                <div className="flex items-center justify-center w-12 h-12 rounded-2xl bg-[#FFEFEA] text-[#E85D43] font-bold text-base">
+                  {customer.name.split(' ').map(w => w[0]).join('').slice(0, 2)}
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold text-[#1E232A]">{customer.name}</h2>
+                  <div className="flex items-center gap-2 text-xs text-[#8C827A] mt-0.5">
+                    <span>{customer.phone}</span>
+                    {customer.address && (
+                      <>
+                        <span>•</span>
+                        <span>{customer.address}</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
 
-            <button
-              onClick={onClose}
-              className="p-1.5 rounded-lg text-[#8C827A] hover:text-[#1E232A] hover:bg-[#FAF7F2] transition-colors"
-            >
-              <X size={18} />
-            </button>
+            <div className="flex items-center gap-1.5">
+              {isEditingCustomer ? (
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => {
+                      if (editName.trim()) {
+                        onUpdateCustomer?.({
+                          ...customer,
+                          name: editName.trim(),
+                          phone: editPhone.trim() || customer.phone,
+                          address: editAddress.trim(),
+                        });
+                        setIsEditingCustomer(false);
+                      }
+                    }}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 transition-colors cursor-pointer"
+                  >
+                    <Check size={13} /> Save
+                  </button>
+                  <button
+                    onClick={() => setIsEditingCustomer(false)}
+                    className="px-2 py-1 rounded-lg text-xs text-[#8C827A] hover:bg-gray-100 transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => {
+                    setEditName(customer.name);
+                    setEditPhone(customer.phone);
+                    setEditAddress(customer.address || '');
+                    setIsEditingCustomer(true);
+                  }}
+                  className="p-1.5 rounded-lg text-[#8C827A] hover:text-[#E85D43] hover:bg-[#FFEFEA] transition-colors cursor-pointer"
+                  title="Edit Customer Details"
+                >
+                  <Edit2 size={16} />
+                </button>
+              )}
+
+              {confirmDeleteCustomer ? (
+                <div className="flex items-center gap-1.5 bg-rose-50 px-2.5 py-1 rounded-xl border border-rose-200">
+                  <span className="text-[11px] font-bold text-rose-700">Delete customer?</span>
+                  <button
+                    onClick={() => {
+                      onDeleteCustomer?.(customer.id);
+                      onClose();
+                    }}
+                    className="px-2 py-0.5 rounded text-[10px] font-bold text-white bg-rose-600 hover:bg-rose-700 transition-colors cursor-pointer"
+                  >
+                    Yes
+                  </button>
+                  <button
+                    onClick={() => setConfirmDeleteCustomer(false)}
+                    className="px-1.5 py-0.5 rounded text-[10px] text-[#8C827A] hover:bg-white transition-colors cursor-pointer"
+                  >
+                    No
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmDeleteCustomer(true)}
+                  className="p-1.5 rounded-lg text-[#8C827A] hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+                  title="Delete Customer"
+                >
+                  <Trash2 size={16} />
+                </button>
+              )}
+              <button
+                onClick={onClose}
+                className="p-1.5 rounded-lg text-[#8C827A] hover:text-[#1E232A] hover:bg-[#FAF7F2] transition-colors cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
           </div>
 
           {/* 3 Summary Stat Chips: Purchases, Payments, Net Balance */}
@@ -283,12 +396,41 @@ export const CustomerLedgerModal: React.FC<CustomerLedgerModalProps> = ({
                       <span className="text-[11px] text-[#A0988F] block mt-0.5">{tx.date}</span>
                     </div>
 
-                    <div className="text-right">
-                      <span className={`text-sm font-bold tabular-nums ${
-                        tx.type === 'gave' ? 'text-rose-600' : 'text-emerald-600'
-                      }`}>
-                        {tx.type === 'gave' ? '+' : '-'}₹{tx.amount.toLocaleString('en-IN')}
-                      </span>
+                    <div className="flex items-center gap-2.5">
+                      <div className="text-right">
+                        <span className={`text-sm font-bold tabular-nums ${
+                          tx.type === 'gave' ? 'text-rose-600' : 'text-emerald-600'
+                        }`}>
+                          {tx.type === 'gave' ? '+' : '-'}₹{tx.amount.toLocaleString('en-IN')}
+                        </span>
+                      </div>
+                      {deletingTxId === tx.id ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => {
+                              onDeleteTransaction?.(tx.id);
+                              setDeletingTxId(null);
+                            }}
+                            className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white bg-rose-600 hover:bg-rose-700 transition-colors cursor-pointer"
+                          >
+                            Del
+                          </button>
+                          <button
+                            onClick={() => setDeletingTxId(null)}
+                            className="px-1 py-0.5 rounded text-[10px] text-gray-500 hover:bg-gray-100 transition-colors cursor-pointer"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setDeletingTxId(tx.id)}
+                          className="p-1 text-[#8C827A] hover:text-rose-600 hover:bg-rose-50 rounded transition-colors cursor-pointer"
+                          title="Delete entry"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}

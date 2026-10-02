@@ -2,17 +2,18 @@ import { PendingConfirmation } from './types';
 import { UserLanguage, formatLocalizedResponse } from './LanguageUtils';
 
 export class ConfirmationManager {
-  public static isAffirmative(text: string): boolean {
-    const t = text.toLowerCase().trim();
-    // Checks English, Hinglish, and Hindi (Devanagari)
-    const yesRegex = /\b(haan|ha|yes|yep|yeah|sure|kar\s+do|theek\s+hai|ok|okay|confirm|proceed|bilkul|haji)\b|हाँ|हां|कर\s*दो|हटा\s*दो|ठीक\s*है|ज़रूर|बिल्कुल|सही\s*है/i;
-    return yesRegex.test(t);
-  }
-
   public static isNegative(text: string): boolean {
     const t = text.toLowerCase().trim();
-    const noRegex = /\b(nahi|na|no|nope|cancel|mat\s+karo|rehno\s+do|stop|dont|don't|never)\b|नहीं|ना|मत\s*करो|रहने\s*दो|कैंसिल/i;
+    const noRegex = /\b(nahi|na|nah|no|nope|cancel|mat\s+karo|mat\s+karna|rehno\s+do|rehne\s+do|stop|dont|don't|never|mat\s+hatao)\b|नहीं|ना|मत\s*करो|मत\s*करना|रहने\s*दो|कैंसिल|रोक\s*दो|मत\s*हटाओ/i;
     return noRegex.test(t);
+  }
+
+  public static isAffirmative(text: string): boolean {
+    if (ConfirmationManager.isNegative(text)) return false;
+    const t = text.toLowerCase().trim();
+    // Handles affirmative phrases like "haan", "ha", "yes", "sure", "kar do", "karo", "jaldi karo", "delete", "hata do", "theek hai", "ok", "confirm"
+    const yesRegex = /\b(haan|ha|haa|yes|yep|yeah|sure|kar\s*do|kardo|karo|karde|kar\s*de|theek\s*hai|theek|ok|okay|confirm|proceed|bilkul|haji|delete|hatao|hata\s*do|jaldi|sahi|achha|thik|go\s*ahead|do\s*it)\b|हाँ|हां|कर\s*दो|करदो|करो|हटा\s*दो|हटाओ|ठीक\s*है|ज़रूर|बिल्कुल|सही\s*है|डिलीट|डिलीट\s*करो|हटा\s*दीजिए|हाँ\s*हटा\s*दो/i;
+    return yesRegex.test(t);
   }
 
   public static formatConfirmationPrompt(

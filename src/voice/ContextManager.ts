@@ -1,5 +1,6 @@
 import { ConversationContext } from './types';
 import { Customer, Transaction } from '../types';
+import { resolveCustomerAgainstDatabase } from './CustomerResolver';
 
 export class ContextManager {
   private context: ConversationContext = {
@@ -84,7 +85,7 @@ export class ContextManager {
   }
 
   /**
-   * Resolves contextual customer references like "usmein", "uski", "woh", "same customer"
+   * Resolves contextual customer references using CustomerResolver and active context
    */
   public resolveCustomer(input: string, knownCustomers: Customer[]): {
     customer?: Customer;
@@ -94,7 +95,7 @@ export class ContextManager {
     const text = input.toLowerCase();
 
     // 1. Check for pronouns referring to active customer
-    const pronounRegex = /\b(usmein|usme|uski|uska|unka|unhe|unko|isme|ismein|iska|iski|woh|same\s+customer|same\s+one|that\s+customer|him|her|them)\b/i;
+    const pronounRegex = /\b(usmein|usme|uski|uska|uske|usse|unka|unki|unke|unhe|unko|unse|isme|ismein|iska|iski|isse|woh|same\s+customer|same\s+one|that\s+customer|him|her|them)\b|उसमें|उसका|उसकी|उसके|उससे|उनका|उनकी|उनके|उनसे|इसमें|इसका|इसकी|इससे/i;
     if (pronounRegex.test(text) && this.context.activeCustomer) {
       const active = knownCustomers.find((c) => c.id === this.context.activeCustomer?.id);
       if (active) {
@@ -102,61 +103,19 @@ export class ContextManager {
       }
     }
 
-    // 2. Direct name matching
-    // Extract candidate names from query
-    for (const cust of knownCustomers) {
-      const nameParts = cust.name.toLowerCase().split(/\s+/);
-      const firstName = nameParts[0];
-      const fullName = cust.name.toLowerCase();
-
-      if (text.includes(fullName)) {
-        return { customer: cust };
-      }
+    // 2. High-precision resolution against customer database
+    const resolution = resolveCustomerAgainstDatabase(input, knownCustomers);
+    if (resolution.status === 'EXACT' || resolution.status === 'NORMALIZED' || resolution.status === 'PHONE') {
+      return { customer: resolution.customer };
+    }
+    if (resolution.status === 'AMBIGUOUS') {
+      return { isAmbiguous: true, candidates: resolution.candidates };
     }
 
-    // First name matching with ambiguity check
-    const matches: Customer[] = [];
-    for (const cust of knownCustomers) {
-      const firstName = cust.name.toLowerCase().split(/\s+/)[0];
-      if (firstName.length > 2 && text.includes(firstName)) {
-        matches.push(cust);
-      }
-    }
-
-    if (matches.length === 1) {
-      return { customer: matches[0] };
-    } else if (matches.length > 1) {
-      return {
-        isAmbiguous: true,
-        candidates: matches,
-      };
-    }
-
-    // Fall back to active customer if query has action without explicit name
+    // Fall back to active customer if query has action without explicit customer name
     if (this.context.activeCustomer && (text.includes('balance') || text.includes('add') || text.includes('de do') || text.includes('batao') || text.includes('last') || text.includes('उधर') || text.includes('उधार') || text.includes('लिख'))) {
       const active = knownCustomers.find((c) => c.id === this.context.activeCustomer?.id);
       if (active) return { customer: active };
-    }
-
-    // 3. Extract named customer pattern even if not yet in knownCustomers
-    const nameMatch = input.match(/(?:^|अरे|जार्विस|भाई|सुनो|please|hey\s+jarvis)?\s*([a-zA-Z\s\u0900-\u097F]+?)\s*(?:के|की|का|ke|ki|ka)\s*(?:अकाउंट|खाते|खाता|account|khata|name|naam)?\s*(?:में|पे|पर|mein|me)/i) ||
-                      input.match(/(?:^|अरे|जार्विस|भाई|सुनो|please|hey\s+jarvis)?\s*([a-zA-Z\s\u0900-\u097F]+?)\s*(?:को|se|से|pe|पे|पर)\s*(?:₹|\d+|उधर|उधार|जमा)/i);
-    if (nameMatch && nameMatch[1]) {
-      let extracted = nameMatch[1].replace(/^(hey\s+jarvis|jarvis|bhai|are|sun|suno|please|zara|ek|naya|new)\s*/i, '').trim();
-      extracted = extracted.replace(/[0-9₹,\.]+/g, '').trim();
-      const reserved = ['account', 'khata', 'customer', 'grahak', 'khatabook', 'entry', 'balance', 'अकाउंट', 'खाता', 'खाते', 'कस्टमर', 'ग्राहक', 'एंट्री', 'उधार', 'उधर', 'जमा', 'uske', 'usmein'];
-      if (extracted.length >= 2 && !reserved.includes(extracted.toLowerCase())) {
-        const adhocCustomer: Customer = {
-          id: `cust-${Date.now()}`,
-          name: extracted,
-          phone: '+91 98000 00000',
-          balance: 0,
-          lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
-          status: 'settled',
-          createdAt: new Intl.DateTimeFormat('en-CA').format(new Date()),
-        };
-        return { customer: adhocCustomer };
-      }
     }
 
     return {};

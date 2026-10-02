@@ -8,7 +8,8 @@ import {
   Filter, 
   Download,
   Calendar,
-  Layers
+  Layers,
+  Trash2
 } from 'lucide-react';
 import { Transaction, Invoice } from '../types';
 
@@ -19,6 +20,7 @@ interface TransactionsSubtabProps {
   onViewInvoice?: (invoice: Invoice) => void;
   isPopulatedState: boolean;
   onTogglePopulatedState: () => void;
+  onDeleteTransaction?: (id: string) => void;
 }
 
 export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
@@ -28,10 +30,12 @@ export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
   onViewInvoice,
   isPopulatedState,
   onTogglePopulatedState,
+  onDeleteTransaction,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'in' | 'out'>('all');
   const [paymentFilter, setPaymentFilter] = useState<string>('all');
+  const [deletingTxId, setDeletingTxId] = useState<string | null>(null);
 
   const activeTransactions = isPopulatedState ? transactions : [];
 
@@ -247,6 +251,7 @@ export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
                   <th className="py-3 px-4">Mode</th>
                   <th className="py-3 px-4 text-right">In (+)</th>
                   <th className="py-3 px-4 text-right">Out (-)</th>
+                  <th className="py-3 px-4 text-center">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#EFE9DF]/60">
@@ -273,7 +278,7 @@ export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
                           {matchedInvoice && onViewInvoice && (
                             <button
                               onClick={() => onViewInvoice(matchedInvoice)}
-                              className="text-[10px] font-bold text-[#E85D43] bg-[#FFEFEA] hover:bg-[#E85D43] hover:text-white px-1.5 py-0.5 rounded transition-colors"
+                              className="text-[10px] font-bold text-[#E85D43] bg-[#FFEFEA] hover:bg-[#E85D43] hover:text-white px-1.5 py-0.5 rounded transition-colors cursor-pointer"
                               title="View Invoice"
                             >
                               View Bill
@@ -294,6 +299,35 @@ export const TransactionsSubtab: React.FC<TransactionsSubtabProps> = ({
                       </td>
                       <td className="py-3.5 px-4 text-right font-bold text-rose-600 tabular-nums">
                         {tx.type === 'out' ? `₹${tx.amount.toLocaleString('en-IN')}` : '-'}
+                      </td>
+                      <td className="py-3.5 px-4 text-center">
+                        {deletingTxId === tx.id ? (
+                          <div className="flex items-center justify-center gap-1">
+                            <button
+                              onClick={() => {
+                                onDeleteTransaction?.(tx.id);
+                                setDeletingTxId(null);
+                              }}
+                              className="px-2 py-0.5 rounded text-[10px] font-bold text-white bg-rose-600 hover:bg-rose-700 transition-colors cursor-pointer"
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              onClick={() => setDeletingTxId(null)}
+                              className="px-1.5 py-0.5 rounded text-[10px] text-[#8C827A] hover:bg-gray-100 transition-colors cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setDeletingTxId(tx.id)}
+                            className="p-1.5 rounded-lg text-[#8C827A] hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+                            title="Delete Transaction"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );

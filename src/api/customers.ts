@@ -1,6 +1,7 @@
 import { Customer } from '../types';
 import { apiRequest } from './apiClient';
 import { cleanPartyOrCustomerName } from '../voice/LanguageUtils';
+import { resolveCustomerAgainstDatabase } from '../voice/CustomerResolver';
 
 export async function fetchCustomers(): Promise<Customer[]> {
   try {
@@ -26,13 +27,13 @@ export async function searchCustomersApi(query: string): Promise<Customer[]> {
 }
 
 export async function getCustomerByIdOrName(idOrName: string): Promise<Customer | null> {
+  if (!idOrName) return null;
   const all = await fetchCustomers();
-  const cleaned = cleanPartyOrCustomerName(idOrName);
-  const lower = cleaned.toLowerCase().trim();
-  const found = all.find(c => c.id === idOrName || c.name.toLowerCase() === lower || c.name.toLowerCase() === idOrName.toLowerCase().trim());
-  if (found) return found;
-  // Partial match
-  return all.find(c => c.name.toLowerCase().includes(lower) || lower.includes(c.name.toLowerCase())) || null;
+  const res = resolveCustomerAgainstDatabase(idOrName, all);
+  if (res.status === 'EXACT' || res.status === 'NORMALIZED' || res.status === 'PHONE') {
+    return res.customer || null;
+  }
+  return null;
 }
 
 export async function createCustomerApi(customer: Partial<Customer>): Promise<Customer> {

@@ -40,6 +40,7 @@ import {
   BusinessSummary 
 } from '../api/reports';
 import { UserLanguage, formatLocalizedResponse, cleanPartyOrCustomerName } from './LanguageUtils';
+import { resolveCustomerAgainstDatabase, cleanExtractedCustomerName } from './CustomerResolver';
 
 export type NavigationTarget = 
   | 'home' 
@@ -65,7 +66,9 @@ export interface NavigationOptions {
 export interface ActionRouterCallbacks {
   onNavigate?: (target: string, options?: NavigationOptions) => void;
   onCustomerUpdated?: (customer: Customer) => void;
+  onCustomerDeleted?: (customerId: string) => void;
   onTransactionAdded?: (tx: Transaction) => void;
+  onTransactionDeleted?: (txId: string, updatedCustomer?: Customer) => void;
   onInvoiceCreated?: (invoice: Invoice) => void;
   onProductsUpdated?: (products: Product[]) => void;
   onRefreshData?: () => void;
@@ -144,39 +147,60 @@ export class ActionRouter {
     const isCredit = transactionType === 'credit';
     const delta = isCredit ? -amount : amount;
 
-    if (customerNameOrId) {
-      customer = await getCustomerByIdOrName(customerNameOrId);
-      if (!customer && customerNameOrId !== 'खाता' && customerNameOrId !== 'Customer' && customerNameOrId !== 'New Customer' && customerNameOrId.length >= 2) {
-        try {
-          customer = await createCustomerApi({
-            name: customerNameOrId,
-            balance: delta,
-            status: delta > 0 ? 'due' : delta < 0 ? 'advance' : 'settled',
-          });
-        } catch (e) {
-          console.warn('Could not auto-create customer:', e);
-        }
-      } else if (customer) {
-        const newBalance = customer.balance + delta;
-        customer = {
-          ...customer,
-          balance: newBalance,
-          status: newBalance > 0 ? 'due' : newBalance < 0 ? 'advance' : 'settled',
-          lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
-        };
-        try {
-          await updateCustomerApi(customer.id, customer);
-        } catch {}
+    if (customerNameOrId && customerNameOrId !== 'खाता' && customerNameOrId !== 'General') {
+      const allCustomers = await fetchCustomers();
+      const resolution = resolveCustomerAgainstDatabase(customerNameOrId, allCustomers);
+
+      if (resolution.status === 'AMBIGUOUS' && resolution.candidates && resolution.candidates.length > 1) {
+        const candidateNames = resolution.candidates.map(c => c.name).join(', ');
+        const ambiguousPrompt = formatLocalizedResponse(lang, {
+          hindi: `${resolution.searchedName || customerNameOrId} नाम के ${resolution.candidates.length} कस्टमर्स मिल रहे हैं (${candidateNames})। आप किस ${resolution.searchedName || customerNameOrId} की बात कर रहे हैं?`,
+          hinglish: `${resolution.searchedName || customerNameOrId} naam ke ${resolution.candidates.length} customers mil rahe hain (${candidateNames}). Kis ${resolution.searchedName || customerNameOrId} ki baat kar rahe hain?`,
+          english: `Found ${resolution.candidates.length} customers matching "${resolution.searchedName || customerNameOrId}" (${candidateNames}). Which one do you mean?`,
+        });
+        return { transaction: null as any, responseText: ambiguousPrompt };
       }
+
+      if (resolution.status === 'NOT_FOUND') {
+        const notFoundName = cleanExtractedCustomerName(resolution.searchedName || customerNameOrId);
+        const notFoundPrompt = formatLocalizedResponse(lang, {
+          hindi: `"${notFoundName}" कस्टमर लिस्ट में नहीं मिल रहे। क्या आप उन्हें नया कस्टमर बनाना चाहते हैं?`,
+          hinglish: `"${notFoundName}" customer list mein nahi mil rahe. Kya aap unhe naya customer banana chahte hain?`,
+          english: `"${notFoundName}" was not found in the customer list. Would you like to add them as a new customer?`,
+        });
+        return { transaction: null as any, responseText: notFoundPrompt };
+      }
+
+      if (resolution.customer) {
+        customer = resolution.customer;
+      }
+    }
+
+    let previousBalance = 0;
+    let newBalance = 0;
+
+    if (customer) {
+      previousBalance = customer.balance;
+      newBalance = previousBalance + delta;
+      customer = {
+        ...customer,
+        balance: newBalance,
+        status: newBalance > 0 ? 'due' : newBalance < 0 ? 'advance' : 'settled',
+        lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+      };
+      try {
+        await updateCustomerApi(customer.id, customer);
+      } catch {}
     }
 
     const tx = await addTransactionApi({
       customerId: customer?.id,
-      partyName: customer ? customer.name : customerNameOrId,
+      partyName: customer ? customer.name : (customerNameOrId || 'खाता'),
       amount,
       transactionType,
       paymentMode,
-      description: description || (customer ? `${transactionType === 'credit' ? 'Payment from' : 'Given to'} ${customer.name}` : undefined),
+      category: isCredit ? 'Customer Payment' : 'Customer Credit',
+      description: description || (customer ? `${isCredit ? 'Payment received from' : 'Credit given to'} ${customer.name}` : undefined),
     });
 
     const finalCustomer = tx.customer || customer;
@@ -191,13 +215,28 @@ export class ActionRouter {
       this.callbacks.onRefreshData();
     }
 
-    const name = finalCustomer ? finalCustomer.name : (customerNameOrId || 'खाता');
-
-    const responseText = formatLocalizedResponse(lang, {
-      hindi: `हो गया। ${name} के खाते में ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'जमा (क्रेडिट)' : 'उधार (डेबिट)'} जोड़ दिए गए हैं।`,
-      hinglish: `Done. ${name} ke account mein ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'jama (credit)' : 'udhar (debit)'} add kar diya.`,
-      english: `Done. Added ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'credit' : 'debit'} to ${name}'s account.`,
-    });
+    let responseText = '';
+    if (finalCustomer) {
+      if (isCredit) {
+        responseText = formatLocalizedResponse(lang, {
+          hindi: `${finalCustomer.name} का ₹${amount.toLocaleString('en-IN')} भुगतान प्राप्त हो गया है। पहले बकाया ₹${previousBalance.toLocaleString('en-IN')} था, अब नया बकाया ₹${newBalance.toLocaleString('en-IN')} है।${newBalance <= 0 ? ' खाता चुकता हो गया है।' : ''}`,
+          hinglish: `${finalCustomer.name} ka ₹${amount.toLocaleString('en-IN')} payment receive ho gaya hai. Pehle balance ₹${previousBalance.toLocaleString('en-IN')} tha, ab naya balance ₹${newBalance.toLocaleString('en-IN')} hai.${newBalance <= 0 ? ' Khata settled ho gaya hai.' : ''}`,
+          english: `Received ₹${amount.toLocaleString('en-IN')} payment from ${finalCustomer.name}. Previous balance was ₹${previousBalance.toLocaleString('en-IN')}, new balance is ₹${newBalance.toLocaleString('en-IN')}.${newBalance <= 0 ? ' Account is fully settled.' : ''}`,
+        });
+      } else {
+        responseText = formatLocalizedResponse(lang, {
+          hindi: `${finalCustomer.name} के खाते में ₹${amount.toLocaleString('en-IN')} उधार लिख दिए हैं। पहले बकाया ₹${previousBalance.toLocaleString('en-IN')} था, अब कुल बकाया ₹${newBalance.toLocaleString('en-IN')} है।`,
+          hinglish: `${finalCustomer.name} ke account mein ₹${amount.toLocaleString('en-IN')} udhar likh diye hain. Pehle balance ₹${previousBalance.toLocaleString('en-IN')} tha, ab total balance ₹${newBalance.toLocaleString('en-IN')} hai.`,
+          english: `Recorded ₹${amount.toLocaleString('en-IN')} credit for ${finalCustomer.name}. Previous balance was ₹${previousBalance.toLocaleString('en-IN')}, new total balance is ₹${newBalance.toLocaleString('en-IN')}.`,
+        });
+      }
+    } else {
+      responseText = formatLocalizedResponse(lang, {
+        hindi: `हो गया। ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'जमा (क्रेडिट)' : 'उधार (डेबिट)'} दर्ज कर दिया गया है।`,
+        hinglish: `Done. ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'jama' : 'udhar'} add kar diya.`,
+        english: `Recorded ₹${amount.toLocaleString('en-IN')} ${isCredit ? 'credit' : 'debit'}.`,
+      });
+    }
 
     return { transaction: tx, customer: finalCustomer || undefined, responseText };
   }
@@ -294,28 +333,50 @@ export class ActionRouter {
     let customer: Customer | null = null;
     const isIncome = direction === 'INCOME';
 
-    if (isIncome && customerNameOrId && customerNameOrId.toLowerCase() !== 'supplier') {
-      customer = await getCustomerByIdOrName(customerNameOrId);
-      if (!customer && customerNameOrId.length >= 2) {
-        try {
-          customer = await createCustomerApi({
-            name: customerNameOrId,
-            balance: -amount,
-            status: 'advance',
-          });
-        } catch {}
-      } else if (customer) {
-        const newBalance = customer.balance - amount;
-        customer = {
-          ...customer,
-          balance: newBalance,
-          status: newBalance > 0 ? 'due' : newBalance < 0 ? 'advance' : 'settled',
-          lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
-        };
-        try {
-          await updateCustomerApi(customer.id, customer);
-        } catch {}
+    if (customerNameOrId && customerNameOrId.toLowerCase() !== 'supplier') {
+      const allCustomers = await fetchCustomers();
+      const resolution = resolveCustomerAgainstDatabase(customerNameOrId, allCustomers);
+
+      if (resolution.status === 'AMBIGUOUS' && resolution.candidates && resolution.candidates.length > 1) {
+        const candidateNames = resolution.candidates.map(c => c.name).join(', ');
+        const ambiguousPrompt = formatLocalizedResponse(lang, {
+          hindi: `${resolution.searchedName || customerNameOrId} नाम के ${resolution.candidates.length} कस्टमर्स मिल रहे हैं (${candidateNames})। आप किस ${resolution.searchedName || customerNameOrId} की बात कर रहे हैं?`,
+          hinglish: `${resolution.searchedName || customerNameOrId} naam ke ${resolution.candidates.length} customers mil rahe hain (${candidateNames}). Kis ${resolution.searchedName || customerNameOrId} ki baat kar rahe hain?`,
+          english: `Found ${resolution.candidates.length} customers matching "${resolution.searchedName || customerNameOrId}" (${candidateNames}). Which one do you mean?`,
+        });
+        return { transaction: null as any, responseText: ambiguousPrompt };
       }
+
+      if (resolution.status === 'NOT_FOUND') {
+        const notFoundName = cleanExtractedCustomerName(resolution.searchedName || customerNameOrId);
+        const notFoundPrompt = formatLocalizedResponse(lang, {
+          hindi: `"${notFoundName}" कस्टमर लिस्ट में नहीं मिल रहे। क्या आप उन्हें नया कस्टमर बनाना चाहते हैं?`,
+          hinglish: `"${notFoundName}" customer list mein nahi mil rahe. Kya aap unhe naya customer banana chahte hain?`,
+          english: `"${notFoundName}" was not found in the customer list. Would you like to add them as a new customer?`,
+        });
+        return { transaction: null as any, responseText: notFoundPrompt };
+      }
+
+      if (resolution.customer) {
+        customer = resolution.customer;
+      }
+    }
+
+    let previousBalance = 0;
+    let newBalance = 0;
+
+    if (customer) {
+      previousBalance = customer.balance;
+      newBalance = isIncome ? previousBalance - amount : previousBalance + amount;
+      customer = {
+        ...customer,
+        balance: newBalance,
+        status: newBalance > 0 ? 'due' : newBalance < 0 ? 'advance' : 'settled',
+        lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+      };
+      try {
+        await updateCustomerApi(customer.id, customer);
+      } catch {}
     }
 
     const partyName = customer ? customer.name : customerNameOrId;
@@ -346,13 +407,13 @@ export class ActionRouter {
 
     const responseText = formatLocalizedResponse(lang, {
       hindi: isIncome
-        ? `${partyName} से ₹${amount.toLocaleString('en-IN')} ${paymentMethod} द्वारा प्राप्त हुए।${customer ? ` नया बकाया ₹${customer.balance.toLocaleString('en-IN')} है।` : ''}`
+        ? `${partyName} से ₹${amount.toLocaleString('en-IN')} ${paymentMethod} द्वारा प्राप्त हुए।${customer ? ` पहले बकाया ₹${previousBalance.toLocaleString('en-IN')} था, अब नया बकाया ₹${newBalance.toLocaleString('en-IN')} है।${newBalance <= 0 ? ' खाता चुकता हो गया है।' : ''}` : ''}`
         : `${partyName} को ₹${amount.toLocaleString('en-IN')} ${paymentMethod} द्वारा भुगतान कर दिया गया है।`,
       hinglish: isIncome
-        ? `${partyName} se ₹${amount.toLocaleString('en-IN')} ${paymentMethod} se receive ho gaye.${customer ? ` Current due ₹${customer.balance.toLocaleString('en-IN')} hai.` : ''}`
+        ? `${partyName} se ₹${amount.toLocaleString('en-IN')} ${paymentMethod} se receive ho gaye.${customer ? ` Pehle balance ₹${previousBalance.toLocaleString('en-IN')} tha, ab naya balance ₹${newBalance.toLocaleString('en-IN')} hai.${newBalance <= 0 ? ' Khata settled ho gaya hai.' : ''}` : ''}`
         : `${partyName} ko ₹${amount.toLocaleString('en-IN')} ${paymentMethod} se payment sent kar diya.`,
       english: isIncome
-        ? `Received ₹${amount.toLocaleString('en-IN')} from ${partyName} via ${paymentMethod}.${customer ? ` Outstanding balance is now ₹${customer.balance.toLocaleString('en-IN')}.` : ''}`
+        ? `Received ₹${amount.toLocaleString('en-IN')} from ${partyName} via ${paymentMethod}.${customer ? ` Previous balance was ₹${previousBalance.toLocaleString('en-IN')}, new balance is ₹${newBalance.toLocaleString('en-IN')}.${newBalance <= 0 ? ' Account is fully settled.' : ''}` : ''}`
         : `Sent ₹${amount.toLocaleString('en-IN')} payment to ${partyName} via ${paymentMethod}.`,
     });
 
@@ -457,39 +518,50 @@ export class ActionRouter {
     return { product: result.product, movement: result.movement, responseText };
   }
 
-  // 5. Payment Summary (UPI, Cash, Card, etc. received today)
+  // 5. Payment Summary (UPI, Cash, Card, etc.)
   public async getPaymentSummary(params: {
-    paymentMethod: 'UPI' | 'Cash' | 'Card' | 'Bank Transfer' | 'All';
-    period?: 'today' | 'week' | 'month';
+    paymentMethod?: string;
+    period?: 'today' | 'yesterday' | 'week' | 'month' | 'all';
     lang?: UserLanguage;
-  }): Promise<{ total: number; count: number; responseText: string }> {
-    const { paymentMethod, lang = 'hinglish' } = params;
-    const allTx = await fetchTransactions();
+  }): Promise<{ totalIn: number; totalOut: number; count: number; responseText: string }> {
+    const { paymentMethod = 'All', period = 'today', lang = 'hinglish' } = params;
+    const all = await fetchTransactions();
+    
+    let filtered = all;
+    if (paymentMethod && paymentMethod.toLowerCase() !== 'all') {
+      const mode = paymentMethod.toLowerCase().trim();
+      filtered = filtered.filter(t => t.paymentMode.toLowerCase().includes(mode));
+    }
 
-    const matching = allTx.filter(t => {
-      const isIncome = t.type === 'in' || t.direction === 'INCOME';
-      if (!isIncome) return false;
-      const isMethod = paymentMethod === 'All' || t.paymentMode?.toLowerCase() === paymentMethod.toLowerCase();
-      if (!isMethod) return false;
-      return true;
-    });
+    if (period === 'today') {
+      const todayStr = new Intl.DateTimeFormat('en-CA').format(new Date());
+      filtered = filtered.filter(t => t.date.includes(todayStr));
+    } else if (period === 'yesterday') {
+      const yDate = new Date(Date.now() - 86400000);
+      const yStr = new Intl.DateTimeFormat('en-CA').format(yDate);
+      filtered = filtered.filter(t => t.date.includes(yStr));
+    } else if (period === 'week') {
+      const weekAgo = new Date(Date.now() - 7 * 86400000);
+      filtered = filtered.filter(t => new Date(t.date) >= weekAgo);
+    } else if (period === 'month') {
+      const monthAgo = new Date(Date.now() - 30 * 86400000);
+      filtered = filtered.filter(t => new Date(t.date) >= monthAgo);
+    }
 
-    const total = matching.reduce((sum, t) => sum + t.amount, 0);
-    const count = matching.length;
+    const totalIn = filtered.filter(t => t.type === 'in' || t.direction === 'INCOME').reduce((s, t) => s + t.amount, 0);
+    const totalOut = filtered.filter(t => t.type === 'out' || t.direction === 'OUTGOING').reduce((s, t) => s + t.amount, 0);
+    const count = filtered.length;
+
+    const modeStr = paymentMethod.toLowerCase() === 'all' ? '' : `${paymentMethod} se `;
+    const periodStr = period === 'today' ? 'Aaj ' : (period === 'yesterday' ? 'Kal ' : (period === 'month' ? 'Is mahine ' : (period === 'week' ? 'Is hafte ' : '')));
 
     const responseText = formatLocalizedResponse(lang, {
-      hindi: paymentMethod === 'All'
-        ? `आज कुल ${count} पेमेंट से ₹${total.toLocaleString('en-IN')} प्राप्त हुए हैं।`
-        : `आज ${paymentMethod} द्वारा कुल ₹${total.toLocaleString('en-IN')} प्राप्त हुए हैं (${count} लेनदेन)।`,
-      hinglish: paymentMethod === 'All'
-        ? `Aaj total ${count} payments se ₹${total.toLocaleString('en-IN')} receive hue hain.`
-        : `Aaj ${paymentMethod} se total ₹${total.toLocaleString('en-IN')} receive hue hain (${count} transactions).`,
-      english: paymentMethod === 'All'
-        ? `Total payments received today: ₹${total.toLocaleString('en-IN')} across ${count} entries.`
-        : `Total ${paymentMethod} received today is ₹${total.toLocaleString('en-IN')} across ${count} entries.`,
+      hindi: `${period === 'today' ? 'आज ' : (period === 'yesterday' ? 'कल ' : '')}${paymentMethod.toLowerCase() === 'all' ? '' : paymentMethod + ' द्वारा '}कुल ₹${totalIn.toLocaleString('en-IN')} प्राप्त हुए हैं${totalOut > 0 ? ` और ₹${totalOut.toLocaleString('en-IN')} भेजे गए हैं` : ''}।`,
+      hinglish: `${periodStr}${modeStr}total ₹${totalIn.toLocaleString('en-IN')} receive hue hain${totalOut > 0 ? ` aur ₹${totalOut.toLocaleString('en-IN')} bheje gaye hain` : ''}.`,
+      english: `${periodStr ? periodStr : 'Total '}${paymentMethod.toLowerCase() === 'all' ? '' : 'via ' + paymentMethod + ' '}received: ₹${totalIn.toLocaleString('en-IN')}${totalOut > 0 ? `, sent: ₹${totalOut.toLocaleString('en-IN')}` : ''}.`,
     });
 
-    return { total, count, responseText };
+    return { totalIn, totalOut, count, responseText };
   }
 
   // 6. Get Invoices / Latest Bill
@@ -635,14 +707,56 @@ export class ActionRouter {
     transactionId: string,
     lang: UserLanguage = 'hinglish'
   ): Promise<{ success: boolean; responseText: string }> {
+    const allTx = await fetchTransactions();
+    let targetTx = allTx.find(t => t.id === transactionId);
+
+    // If targetTx not found by ID directly, fallback to latest transaction
+    if (!targetTx && allTx.length > 0) {
+      targetTx = allTx[0];
+      transactionId = targetTx.id;
+    }
+
     await deleteTransactionApi(transactionId);
+
+    // Revert customer balance based on the deleted transaction
+    let updatedCustomer: Customer | undefined;
+    if (targetTx) {
+      const party = targetTx.partyName;
+      const custId = targetTx.customerId;
+      const allCust = await fetchCustomers();
+      const cust = allCust.find(c => (custId && c.id === custId) || (party && c.name.toLowerCase() === party.toLowerCase()));
+
+      if (cust) {
+        const delta = targetTx.type === 'in' ? targetTx.amount : -targetTx.amount;
+        const newBal = cust.balance + delta;
+        const updatedCust: Customer = {
+          ...cust,
+          balance: newBal,
+          status: newBal > 0 ? 'due' : newBal < 0 ? 'advance' : 'settled',
+          lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+        };
+        await updateCustomerApi(cust.id, updatedCust);
+        updatedCustomer = updatedCust;
+
+        if (this.callbacks.onCustomerUpdated) {
+          this.callbacks.onCustomerUpdated(updatedCust);
+        }
+      }
+    }
+
+    if (this.callbacks.onTransactionDeleted) {
+      this.callbacks.onTransactionDeleted(transactionId, updatedCustomer);
+    }
     if (this.callbacks.onRefreshData) {
       this.callbacks.onRefreshData();
     }
+
+    const partyStr = targetTx?.partyName ? `${targetTx.partyName} का ` : '';
+    const amtStr = targetTx ? `₹${targetTx.amount.toLocaleString('en-IN')} का ` : '';
     const responseText = formatLocalizedResponse(lang, {
-      hindi: 'हो गया। ट्रांजैक्शन सफलतापूर्वक डिलीट कर दिया गया है।',
-      hinglish: 'Done. Transaction successfully delete kar diya gaya.',
-      english: 'Done. The transaction has been deleted successfully.',
+      hindi: `हो गया। ${partyStr}${amtStr}लेनदेन सफलतापूर्वक हटा दिया गया है।`,
+      hinglish: `Done. ${partyStr}${amtStr}transaction delete kar diya gaya hai.`,
+      english: `Done. Successfully deleted ${partyStr}${amtStr}transaction.`,
     });
     return { success: true, responseText };
   }
@@ -742,14 +856,22 @@ export class ActionRouter {
     customerId: string,
     lang: UserLanguage = 'hinglish'
   ): Promise<{ success: boolean; responseText: string }> {
-    await deleteCustomerApi(customerId);
+    const all = await fetchCustomers();
+    const cust = all.find(c => c.id === customerId || c.name.toLowerCase() === customerId.toLowerCase().trim());
+    const realId = cust ? cust.id : customerId;
+    const custName = cust ? cust.name : customerId;
+
+    await deleteCustomerApi(realId);
+    if (this.callbacks.onCustomerDeleted) {
+      this.callbacks.onCustomerDeleted(realId);
+    }
     if (this.callbacks.onRefreshData) {
       this.callbacks.onRefreshData();
     }
     const responseText = formatLocalizedResponse(lang, {
-      hindi: 'कस्टमर रिकॉर्ड सफलतापूर्वक हटा दिया गया है।',
-      hinglish: 'Customer record successfully delete kar diya.',
-      english: 'Customer record has been deleted successfully.',
+      hindi: `ग्राहक ${custName} का खाता सफलतापूर्वक हटा दिया गया है।`,
+      hinglish: `Customer ${custName} ka account delete kar diya gaya hai.`,
+      english: `Customer record for ${custName} has been deleted successfully.`,
     });
     return { success: true, responseText };
   }
@@ -757,35 +879,117 @@ export class ActionRouter {
   // 5b. Get Transactions
   public async getTransactions(params: {
     customerNameOrId?: string;
+    paymentMode?: string;
+    period?: 'today' | 'yesterday' | 'week' | 'month' | 'all';
+    type?: 'in' | 'out' | 'all';
+    minAmount?: number;
+    offset?: number;
     limit?: number;
     lang?: UserLanguage;
   }): Promise<{ transactions: Transaction[]; responseText: string }> {
-    const { customerNameOrId, limit = 5, lang = 'hinglish' } = params;
+    const { customerNameOrId, paymentMode, period, type, minAmount, offset = 0, limit = 5, lang = 'hinglish' } = params;
     let txs = await fetchTransactions();
-    if (customerNameOrId) {
-      const lower = customerNameOrId.toLowerCase();
-      txs = txs.filter(t => t.partyName?.toLowerCase().includes(lower));
-    }
-    const recent = txs.slice(0, limit);
 
-    if (recent.length === 0) {
+    if (customerNameOrId) {
+      const lower = customerNameOrId.toLowerCase().trim();
+      txs = txs.filter(t => t.partyName?.toLowerCase().includes(lower) || (t.customerId && t.customerId === customerNameOrId));
+    }
+
+    if (paymentMode && paymentMode.toLowerCase() !== 'all') {
+      const mode = paymentMode.toLowerCase();
+      txs = txs.filter(t => t.paymentMode.toLowerCase().includes(mode));
+    }
+
+    if (type && type !== 'all') {
+      txs = txs.filter(t => t.type === type);
+    }
+
+    if (minAmount && minAmount > 0) {
+      txs = txs.filter(t => t.amount >= minAmount);
+    }
+
+    if (period === 'today') {
+      const todayStr = new Intl.DateTimeFormat('en-CA').format(new Date());
+      txs = txs.filter(t => t.date.includes(todayStr));
+    } else if (period === 'yesterday') {
+      const yesterdayDate = new Date(Date.now() - 86400000);
+      const yesterdayStr = new Intl.DateTimeFormat('en-CA').format(yesterdayDate);
+      txs = txs.filter(t => t.date.includes(yesterdayStr));
+    }
+
+    const sliced = txs.slice(offset, offset + limit);
+
+    if (sliced.length === 0) {
       const responseText = formatLocalizedResponse(lang, {
         hindi: customerNameOrId ? `${customerNameOrId} के लिए कोई हालिया लेनदेन नहीं मिला।` : 'कोई लेनदेन नहीं मिला।',
         hinglish: customerNameOrId ? `${customerNameOrId} ke liye koi transaction nahi mila.` : 'Koi transaction nahi mila.',
-        english: customerNameOrId ? `No recent transactions found for ${customerNameOrId}.` : 'No transactions found.',
+        english: customerNameOrId ? `No transactions found for ${customerNameOrId}.` : 'No transactions found.',
       });
       return { transactions: [], responseText };
     }
 
-    const first = recent[0];
-    const isCredit = first.type === 'in';
-    const responseText = formatLocalizedResponse(lang, {
-      hindi: `पिछला लेनदेन ₹${first.amount.toLocaleString('en-IN')} का (${isCredit ? 'जमा' : 'उधार'}) था।`,
-      hinglish: `Last transaction ₹${first.amount.toLocaleString('en-IN')} ka (${isCredit ? 'jama' : 'udhar'}) tha.`,
-      english: `Last transaction was for ₹${first.amount.toLocaleString('en-IN')} (${isCredit ? 'credit' : 'debit'}).`,
-    });
+    const first = sliced[0];
+    const isIncome = first.type === 'in' || first.direction === 'INCOME';
+    const isPaymentHistory = type === 'in';
+    const party = first.partyName || customerNameOrId || 'Customer';
 
-    return { transactions: recent, responseText };
+    let responseText = '';
+    if (isPaymentHistory) {
+      responseText = formatLocalizedResponse(lang, {
+        hindi: `${party} ने अंतिम भुगतान ₹${first.amount.toLocaleString('en-IN')} (${first.paymentMode}) ${first.date} को किया था।`,
+        hinglish: `${party} ne last payment ₹${first.amount.toLocaleString('en-IN')} (${first.paymentMode}) ${first.date} ko kiya tha.`,
+        english: `Last payment from ${party} was ₹${first.amount.toLocaleString('en-IN')} via ${first.paymentMode} on ${first.date}.`,
+      });
+    } else {
+      responseText = formatLocalizedResponse(lang, {
+        hindi: `${party} का पिछला लेनदेन ₹${first.amount.toLocaleString('en-IN')} (${isIncome ? 'जमा/क्रेडिट' : 'उधार/डेबिट'}, ${first.paymentMode}) ${first.date} का है।`,
+        hinglish: `${party} ki last transaction ₹${first.amount.toLocaleString('en-IN')} (${isIncome ? 'jama' : 'udhar'}, ${first.paymentMode}) ${first.date} ki hai.`,
+        english: `Latest transaction for ${party}: ₹${first.amount.toLocaleString('en-IN')} (${isIncome ? 'received' : 'given'}, ${first.paymentMode}) on ${first.date}.`,
+      });
+    }
+
+    return { transactions: sliced, responseText };
+  }
+
+  // 5c. Get Due Customers / Settled Customers Summary
+  public async getDueCustomers(params: {
+    filter?: 'due' | 'settled' | 'all';
+    lang?: UserLanguage;
+  }): Promise<{ customers: Customer[]; dueCount: number; totalDue: number; responseText: string }> {
+    const { filter = 'due', lang = 'hinglish' } = params;
+    const all = await fetchCustomers();
+
+    if (filter === 'settled') {
+      const settled = all.filter(c => c.balance <= 0);
+      const responseText = formatLocalizedResponse(lang, {
+        hindi: `कुल ${settled.length} ग्राहकों का खाता चुकता (Zero balance) है: ${settled.slice(0, 3).map(c => c.name).join(', ')}${settled.length > 3 ? ' आदि' : ''}।`,
+        hinglish: `Total ${settled.length} customers ka balance settled (zero) hai: ${settled.slice(0, 3).map(c => c.name).join(', ')}${settled.length > 3 ? ' etc' : ''}.`,
+        english: `${settled.length} customers have settled zero balances: ${settled.slice(0, 3).map(c => c.name).join(', ')}.`,
+      });
+      return { customers: settled, dueCount: 0, totalDue: 0, responseText };
+    }
+
+    const dueList = all.filter(c => c.balance > 0).sort((a, b) => b.balance - a.balance);
+    const totalDue = dueList.reduce((s, c) => s + c.balance, 0);
+    const dueCount = dueList.length;
+
+    let responseText = '';
+    if (dueCount === 0) {
+      responseText = formatLocalizedResponse(lang, {
+        hindi: 'किसी भी ग्राहक का बकाया बाकी नहीं है। सभी खाते चुकता हैं।',
+        hinglish: 'Kisi bhi customer ka udhar baki nahi hai. Sabhi accounts settled hain.',
+        english: 'No customer has any pending dues. All accounts are settled.',
+      });
+    } else {
+      const top = dueList[0];
+      responseText = formatLocalizedResponse(lang, {
+        hindi: `कुल ${dueCount} ग्राहकों का ₹${totalDue.toLocaleString('en-IN')} बकाया है। सबसे ज्यादा बकाया ${top.name} (₹${top.balance.toLocaleString('en-IN')}) का है।`,
+        hinglish: `Total ${dueCount} customers ka ₹${totalDue.toLocaleString('en-IN')} udhar baaki hai. Sabse zyada balance ${top.name} (₹${top.balance.toLocaleString('en-IN')}) ka hai.`,
+        english: `${dueCount} customers owe a total of ₹${totalDue.toLocaleString('en-IN')}. Highest pending balance is ${top.name} with ₹${top.balance.toLocaleString('en-IN')}.`,
+      });
+    }
+
+    return { customers: dueList, dueCount, totalDue, responseText };
   }
 
   // 5c. Update Transaction

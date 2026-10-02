@@ -35,8 +35,8 @@ import {
   sampleProducts, 
   sampleTransactions 
 } from './data/mockData';
-import { fetchCustomers, createCustomerApi } from './api/customers';
-import { fetchTransactions, addTransactionApi } from './api/transactions';
+import { fetchCustomers, createCustomerApi, deleteCustomerApi, updateCustomerApi } from './api/customers';
+import { fetchTransactions, addTransactionApi, deleteTransactionApi } from './api/transactions';
 import { fetchProducts } from './api/products';
 import { fetchInvoices } from './api/invoices';
 
@@ -219,6 +219,48 @@ export default function App() {
           }
           return prev;
         });
+      },
+      onCustomerDeleted: (customerId) => {
+        setCustomers((prev) => {
+          const updated = prev.filter((c) => c.id !== customerId);
+          localStorage.setItem('notibook_customers', JSON.stringify(updated));
+          return updated;
+        });
+        setCustomerTransactions((prev) => {
+          const updated = { ...prev };
+          delete updated[customerId];
+          localStorage.setItem('notibook_customer_txs', JSON.stringify(updated));
+          return updated;
+        });
+        setSelectedCustomerForLedger((prev) => (prev && prev.id === customerId ? null : prev));
+      },
+      onTransactionDeleted: (txId, updatedCustomer) => {
+        const cleanId = txId.replace(/^ctx-/, '');
+        setTransactions((prev) => {
+          const updated = prev.filter((t) => t.id !== cleanId && t.id !== txId && t.id !== `tx-${cleanId}`);
+          localStorage.setItem('notibook_transactions', JSON.stringify(updated));
+          return updated;
+        });
+        setCustomerTransactions((prev) => {
+          const updated = { ...prev };
+          for (const cId in updated) {
+            updated[cId] = updated[cId].filter(entry => 
+              entry.id !== txId && 
+              entry.id !== cleanId && 
+              entry.id !== `ctx-${cleanId}`
+            );
+          }
+          localStorage.setItem('notibook_customer_txs', JSON.stringify(updated));
+          return updated;
+        });
+        if (updatedCustomer) {
+          setCustomers((prev) => {
+            const updated = prev.map((c) => (c.id === updatedCustomer.id ? updatedCustomer : c));
+            localStorage.setItem('notibook_customers', JSON.stringify(updated));
+            return updated;
+          });
+          setSelectedCustomerForLedger((prev) => (prev && prev.id === updatedCustomer.id ? updatedCustomer : prev));
+        }
       },
       onTransactionAdded: (tx) => {
         setIsPopulatedState(true);
@@ -529,6 +571,122 @@ export default function App() {
         return updated;
       });
     }
+  };
+
+  // Delete Transaction (atomic update: transactions list + customer balance + passbook entry + backend API)
+  const handleDeleteTransaction = async (txId: string) => {
+    const cleanId = txId.replace(/^ctx-/, '');
+
+    // 1. Locate transaction
+    const targetTx = transactions.find(t => t.id === cleanId || t.id === txId || t.id === `tx-${cleanId}`);
+
+    // 2. Locate passbook entry if in customerTransactions
+    let targetCustomerTx: CustomerTransaction | null = null;
+    let targetCustomerId: string | null = targetTx?.customerId || null;
+
+    for (const cId in customerTransactions) {
+      const found = customerTransactions[cId].find(ctx =>
+        ctx.id === txId ||
+        ctx.id === cleanId ||
+        ctx.id === `ctx-${cleanId}` ||
+        (targetTx && ctx.amount === targetTx.amount && (ctx.note === targetTx.description || ctx.billId === targetTx.invoiceId))
+      );
+      if (found) {
+        targetCustomerTx = found;
+        targetCustomerId = cId;
+        break;
+      }
+    }
+
+    // 3. Determine amount and direction to reverse customer debt
+    let delta = 0;
+    if (targetTx) {
+      delta = targetTx.type === 'in' ? targetTx.amount : -targetTx.amount;
+    } else if (targetCustomerTx) {
+      delta = targetCustomerTx.type === 'got' ? targetCustomerTx.amount : -targetCustomerTx.amount;
+    }
+
+    if (delta !== 0 && targetCustomerId) {
+      setCustomers(prev => {
+        const idx = prev.findIndex(c => c.id === targetCustomerId || (targetTx?.partyName && c.name.toLowerCase() === targetTx.partyName.toLowerCase()));
+        if (idx >= 0) {
+          const cust = prev[idx];
+          const newBal = cust.balance + delta;
+          const updatedCust: Customer = {
+            ...cust,
+            balance: newBal,
+            status: newBal > 0 ? 'due' : newBal < 0 ? 'advance' : 'settled',
+            lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+          };
+          const updated = [...prev];
+          updated[idx] = updatedCust;
+          localStorage.setItem('notibook_customers', JSON.stringify(updated));
+          setSelectedCustomerForLedger(curr => curr && (curr.id === cust.id || curr.name.toLowerCase() === cust.name.toLowerCase()) ? updatedCust : curr);
+          void updateCustomerApi(cust.id, updatedCust);
+          return updated;
+        }
+        return prev;
+      });
+    }
+
+    // 4. Remove from transactions
+    setTransactions(prev => {
+      const updated = prev.filter(t => t.id !== cleanId && t.id !== txId && t.id !== `tx-${cleanId}`);
+      localStorage.setItem('notibook_transactions', JSON.stringify(updated));
+      return updated;
+    });
+
+    // 5. Remove from customerTransactions
+    setCustomerTransactions(prev => {
+      const updated: Record<string, CustomerTransaction[]> = {};
+      for (const cId in prev) {
+        updated[cId] = prev[cId].filter(ctx =>
+          ctx.id !== txId &&
+          ctx.id !== cleanId &&
+          ctx.id !== `ctx-${cleanId}` &&
+          !(targetTx && ctx.amount === targetTx.amount && (ctx.note === targetTx.description || ctx.billId === targetTx.invoiceId))
+        );
+      }
+      localStorage.setItem('notibook_customer_txs', JSON.stringify(updated));
+      return updated;
+    });
+
+    // 6. Delete on server API
+    try {
+      await deleteTransactionApi(cleanId);
+    } catch {}
+  };
+
+  // Delete Customer (removes customer, clears ledger, updates server & storage)
+  const handleDeleteCustomer = async (customerId: string) => {
+    setCustomers(prev => {
+      const updated = prev.filter(c => c.id !== customerId);
+      localStorage.setItem('notibook_customers', JSON.stringify(updated));
+      return updated;
+    });
+    setCustomerTransactions(prev => {
+      const updated = { ...prev };
+      delete updated[customerId];
+      localStorage.setItem('notibook_customer_txs', JSON.stringify(updated));
+      return updated;
+    });
+    setSelectedCustomerForLedger(prev => prev && prev.id === customerId ? null : prev);
+    try {
+      await deleteCustomerApi(customerId);
+    } catch {}
+  };
+
+  // Update Customer Profile (name, phone, address, notes)
+  const handleUpdateCustomer = async (updatedCust: Customer) => {
+    setCustomers(prev => {
+      const updated = prev.map(c => c.id === updatedCust.id ? updatedCust : c);
+      localStorage.setItem('notibook_customers', JSON.stringify(updated));
+      return updated;
+    });
+    setSelectedCustomerForLedger(updatedCust);
+    try {
+      await updateCustomerApi(updatedCust.id, updatedCust);
+    } catch {}
   };
 
   // Add Product
@@ -891,6 +1049,7 @@ export default function App() {
               isPopulatedState={isPopulatedState}
               onTogglePopulatedState={handleTogglePopulatedState}
               onExportBook={handleExportBook}
+              onDeleteTransaction={handleDeleteTransaction}
             />
           )}
         </main>
@@ -940,6 +1099,9 @@ export default function App() {
         onViewInvoice={(inv) => setViewingInvoice(inv)}
         onAddCustomerTx={handleCustomerTx}
         onSendWhatsappReminder={handleSendWhatsappReminder}
+        onDeleteTransaction={handleDeleteTransaction}
+        onDeleteCustomer={handleDeleteCustomer}
+        onUpdateCustomer={handleUpdateCustomer}
         settings={settings}
       />
 

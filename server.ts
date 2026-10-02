@@ -144,8 +144,15 @@ app.post('/api/customers', (req, res) => {
 });
 
 app.delete('/api/customers/:id', (req, res) => {
-  customers = customers.filter(c => c.id !== req.params.id);
-  res.json({ success: true });
+  const param = req.params.id;
+  const cust = customers.find(c => c.id === param || c.name.toLowerCase() === param.toLowerCase());
+  if (cust) {
+    customers = customers.filter(c => c.id !== cust.id);
+    transactions = transactions.filter(t => (t as any).customerId !== cust.id && t.partyName?.toLowerCase() !== cust.name.toLowerCase());
+  } else {
+    customers = customers.filter(c => c.id !== param);
+  }
+  res.json({ success: true, deletedCustomer: cust });
 });
 
 app.put('/api/customers/:id', (req, res) => {
@@ -209,8 +216,37 @@ app.put('/api/transactions/:id', (req, res) => {
 });
 
 app.delete('/api/transactions/:id', (req, res) => {
-  transactions = transactions.filter(t => t.id !== req.params.id);
-  res.json({ success: true });
+  const paramId = req.params.id;
+  const cleanParamId = paramId.replace(/^ctx-/, '').replace(/^tx-/, '');
+  const targetTx = transactions.find(t => 
+    t.id === paramId || 
+    t.id === cleanParamId || 
+    t.id === `tx-${cleanParamId}` || 
+    t.id.replace(/^tx-/, '') === cleanParamId
+  );
+  transactions = transactions.filter(t => 
+    t.id !== paramId && 
+    t.id !== cleanParamId && 
+    t.id !== `tx-${cleanParamId}` && 
+    t.id.replace(/^tx-/, '') !== cleanParamId
+  );
+
+  let updatedCust: any = null;
+  if (targetTx && (targetTx.partyName || (targetTx as any).customerId)) {
+    const cust = customers.find(c => 
+      ((targetTx as any).customerId && c.id === (targetTx as any).customerId) || 
+      (targetTx.partyName && c.name.toLowerCase() === targetTx.partyName.toLowerCase())
+    );
+    if (cust) {
+      const delta = targetTx.type === 'in' ? targetTx.amount : -targetTx.amount;
+      cust.balance += delta;
+      cust.status = cust.balance > 0 ? 'due' : cust.balance < 0 ? 'advance' : 'settled';
+      cust.lastTransactionDate = new Date().toISOString().slice(0, 10);
+      updatedCust = cust;
+    }
+  }
+
+  res.json({ success: true, deletedTransaction: targetTx, updatedCustomer: updatedCust });
 });
 
 // Reminders
@@ -852,7 +888,7 @@ CRITICAL ACTION DECISION FOR ACKNOWLEDGMENTS ("theek hai", "ok", "alright", "bas
   ];
 
   if (ai) {
-    const candidateModels = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
+    const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-pro'];
     let lastErr: any = null;
 
     // Build conversation contents with history if available
@@ -1088,12 +1124,51 @@ CRITICAL ACTION DECISION FOR ACKNOWLEDGMENTS ("theek hai", "ok", "alright", "bas
     return res.json({ reply: 'I am Jarvis, NotiBook\'s voice assistant. I help you manage customer Khatabooks, record daily sales and expenses, generate bills, and track dues.' });
   }
 
-  // 4. Total Dues / Market Udhar query ("Total udhar kitna hai", "Market me kitna paisa fasa hai", "Kul bakaya")
-  if (lower.includes('total udhar') || lower.includes('baki paisa') || lower.includes('market udhar') || lower.includes('market me') || lower.includes('kul udhar') || lower.includes('kul bakaya') || lower.includes('pending dues') || lower.includes('total dues') || lower.includes('sabka udhar') || raw.includes('कुल उधारी') || raw.includes('बाकी पैसा') || raw.includes('कुल बकाया')) {
+  // 4. Total Dues / Market Udhar / Due Customers query
+  if (lower.includes('sabse zyada') || lower.includes('highest') || raw.includes('सबसे ज्यादा') || raw.includes('सबसे ज़्यादा')) {
+    return res.json({ toolCall: { name: 'get_due_customers', args: { filter: 'due' } } });
+  }
+
+  if (
+    lower.includes('payment pending') ||
+    lower.includes('pending payment') ||
+    lower.includes('kitne customer ka') ||
+    lower.includes('kitne customers ka') ||
+    lower.includes('paisa baaki') ||
+    lower.includes('paisa baki') ||
+    lower.includes('udhar baaki') ||
+    lower.includes('udhar baki') ||
+    raw.includes('कितने ग्राहकों का') ||
+    raw.includes('कितने कस्टमर का') ||
+    raw.includes('पैसा बाकी')
+  ) {
+    return res.json({ toolCall: { name: 'get_due_customers', args: { filter: 'due' } } });
+  }
+
+  if (lower.includes('settled') || lower.includes('zero balance') || lower.includes('chukta') || raw.includes('चुकता')) {
+    return res.json({ toolCall: { name: 'get_due_customers', args: { filter: 'settled' } } });
+  }
+
+  if (lower.includes('total udhar') || lower.includes('baki paisa') || lower.includes('market udhar') || lower.includes('market me') || lower.includes('kul udhar') || lower.includes('kul bakaya') || lower.includes('pending dues') || lower.includes('total dues') || lower.includes('sabka udhar') || lower.includes('lena hai') || raw.includes('कुल उधारी') || raw.includes('बाकी पैसा') || raw.includes('कुल बकाया') || raw.includes('लेना है')) {
     return res.json({ toolCall: { name: 'get_account_balance', args: {} } });
   }
 
-  // 5. Customer count & list query ("Kitne customer hain", "How many customers")
+  // 5. Payment Method queries (UPI, Cash, etc.)
+  if (lower.includes('upi')) {
+    const period = lower.includes('mahine') || lower.includes('month') ? 'month' : (lower.includes('kal') || lower.includes('yesterday') ? 'yesterday' : (lower.includes('hafte') || lower.includes('week') ? 'week' : 'today'));
+    if (lower.includes('kitna') || lower.includes('aaya') || lower.includes('mila') || lower.includes('summary') || lower.includes('transaction') || raw.includes('कितना') || raw.includes('आया')) {
+      return res.json({ toolCall: { name: 'get_payment_method_summary', args: { payment_method: 'UPI', period } } });
+    }
+  }
+
+  if (lower.includes('cash') || raw.includes('कैश') || raw.includes('नकद')) {
+    const period = lower.includes('mahine') || lower.includes('month') ? 'month' : (lower.includes('kal') || lower.includes('yesterday') ? 'yesterday' : (lower.includes('hafte') || lower.includes('week') ? 'week' : 'today'));
+    if (lower.includes('kitna') || lower.includes('aaya') || lower.includes('mila') || lower.includes('summary') || lower.includes('transaction') || raw.includes('कितना') || raw.includes('आया')) {
+      return res.json({ toolCall: { name: 'get_payment_method_summary', args: { payment_method: 'Cash', period } } });
+    }
+  }
+
+  // 5b. Customer count query ("Kitne customer hain", "How many customers")
   if (lower.includes('kitne customer') || lower.includes('how many customer') || lower.includes('total customer') || lower.includes('sab customer') || raw.includes('कितने ग्राहक') || raw.includes('कितने कस्टमर')) {
     const count = customers.length;
     if (userLang === 'hindi') {
@@ -1106,16 +1181,32 @@ CRITICAL ACTION DECISION FOR ACKNOWLEDGMENTS ("theek hai", "ok", "alright", "bas
   }
 
   // 6. Report & Sales queries
-  if (lower.includes('kitna paisa aaya') || lower.includes('aaj kitna aaya') || lower.includes('summary') || lower.includes('sales') || lower.includes('bikri') || raw.includes('कितना पैसा आया') || raw.includes('बिक्री बताओ') || raw.includes('आज की बिक्री')) {
+  if (lower.includes('kal kitna') || lower.includes('kal ka report') || lower.includes('kal ki summary') || raw.includes('कल कितना') || raw.includes('कल की रिपोर्ट')) {
+    return res.json({ toolCall: { name: 'get_report', args: { period: 'yesterday' } } });
+  }
+  if (lower.includes('is mahine') || lower.includes('this month') || lower.includes('mahine kitna') || raw.includes('इस महीने') || raw.includes('महीने का')) {
+    return res.json({ toolCall: { name: 'get_report', args: { period: 'month' } } });
+  }
+  if (lower.includes('is hafte') || lower.includes('this week') || lower.includes('hafte ka') || raw.includes('इस हफ्ते') || raw.includes('सप्ताह')) {
+    return res.json({ toolCall: { name: 'get_report', args: { period: 'week' } } });
+  }
+  if (lower.includes('kitna paisa aaya') || lower.includes('kitna paisa gaya') || lower.includes('aaj kitna aaya') || lower.includes('summary') || lower.includes('sales') || lower.includes('bikri') || raw.includes('कितना पैसा आया') || raw.includes('कितना पैसा गया') || raw.includes('बिक्री बताओ') || raw.includes('आज की बिक्री')) {
     return res.json({ toolCall: { name: 'get_report', args: { period: 'today' } } });
   }
 
   // 7. Delete transaction / customer
-  if (lower.includes('delete') || lower.includes('hata do') || raw.includes('डिलीट') || raw.includes('हटाओ')) {
-    if (lower.includes('customer') || raw.includes('ग्राहक') || raw.includes('कस्टमर')) {
-      return res.json({ toolCall: { name: 'delete_customer', args: { customer_name: custName } } });
+  if (lower.includes('delete') || lower.includes('hata do') || lower.includes('hatao') || raw.includes('डिलीट') || raw.includes('हटाओ') || raw.includes('हटा दो')) {
+    let targetDeleteName = custName;
+    for (const c of customers) {
+      if (lower.includes(c.name.toLowerCase())) {
+        targetDeleteName = c.name;
+        break;
+      }
     }
-    return res.json({ toolCall: { name: 'delete_transaction', args: { customer_name: custName } } });
+    if (lower.includes('customer') || raw.includes('ग्राहक') || raw.includes('कस्टमर')) {
+      return res.json({ toolCall: { name: 'delete_customer', args: { customer_name: targetDeleteName } } });
+    }
+    return res.json({ toolCall: { name: 'delete_transaction', args: { customer_name: targetDeleteName } } });
   }
 
   // 8. Robust Multilingual Transaction Intent & Entity Extraction

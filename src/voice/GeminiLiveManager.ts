@@ -1,9 +1,15 @@
 import { ActionRouter } from './ActionRouter';
 import { ContextManager } from './ContextManager';
 import { ConfirmationManager } from './ConfirmationManager';
-import { Customer } from '../types';
+import { Customer, Transaction } from '../types';
 import { fetchCustomers } from '../api/customers';
+import { fetchTransactions } from '../api/transactions';
 import { detectLanguage, UserLanguage, formatLocalizedResponse } from './LanguageUtils';
+import { 
+  resolveCustomerAgainstDatabase, 
+  detectFinancialIntent, 
+  cleanExtractedCustomerName 
+} from './CustomerResolver';
 import { VoiceState } from './types';
 
 export interface GeminiLiveCallbacks {
@@ -315,13 +321,15 @@ export class GeminiLiveManager {
         if (res.customer) {
           this.contextManager.setActiveCustomer(res.customer);
         }
-        this.contextManager.setActiveTransaction({
-          id: res.transaction.id,
-          amount: res.transaction.amount,
-          description: res.transaction.description,
-          type: res.transaction.type === 'in' ? 'credit' : 'debit',
-        });
-        return args.speech_response || res.responseText;
+        if (res.transaction) {
+          this.contextManager.setActiveTransaction({
+            id: res.transaction.id,
+            amount: res.transaction.amount,
+            description: res.transaction.description,
+            type: res.transaction.type === 'in' ? 'credit' : 'debit',
+          });
+        }
+        return res.responseText || args.speech_response;
       }
 
       if (name === 'get_transactions') {
@@ -345,26 +353,89 @@ export class GeminiLiveManager {
       }
 
       if (name === 'delete_transaction') {
-        const cust = resolvedCustomer || (this.contextManager.getActiveCustomer() ? await fetchCustomers().then(c => c.find(x => x.id === this.contextManager.getActiveCustomer()?.id)) : null);
-        const lastTx = this.contextManager.getActiveTransaction();
-        const txAmount = lastTx?.amount || 500;
-        const targetName = cust?.name || 'Ravi';
+        const targetCustomerName = args.customer_name || resolvedCustomer?.name || this.contextManager.getActiveCustomer()?.name;
+        const allCust = await fetchCustomers();
+        const cust = targetCustomerName
+          ? allCust.find(c => c.name.toLowerCase().includes(targetCustomerName.toLowerCase().trim()))
+          : (this.contextManager.getActiveCustomer() ? allCust.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : null);
+
+        const allTx = await fetchTransactions();
+        let targetTx: Transaction | undefined;
+
+        if (args.transaction_id && args.transaction_id !== 'last-tx') {
+          targetTx = allTx.find(t => t.id === args.transaction_id);
+        }
+
+        if (!targetTx && cust) {
+          targetTx = allTx.find(t => (t.customerId && t.customerId === cust.id) || (t.partyName && t.partyName.toLowerCase() === cust.name.toLowerCase()));
+        }
+
+        if (!targetTx && targetCustomerName) {
+          const lowerName = targetCustomerName.toLowerCase().trim();
+          targetTx = allTx.find(t => t.partyName && t.partyName.toLowerCase().includes(lowerName));
+        }
+
+        if (!targetTx && this.contextManager.getActiveTransaction()?.id) {
+          targetTx = allTx.find(t => t.id === this.contextManager.getActiveTransaction()!.id);
+        }
+
+        if (!targetTx && allTx.length > 0) {
+          targetTx = allTx[0];
+        }
+
+        if (!targetTx) {
+          return formatLocalizedResponse(userLang, {
+            hindi: targetCustomerName ? `${targetCustomerName} के लिए डिलीट करने हेतु कोई लेनदेन नहीं मिला।` : 'डिलीट करने के लिए कोई लेनदेन नहीं मिला।',
+            hinglish: targetCustomerName ? `${targetCustomerName} ke liye delete karne ke liye koi transaction nahi mila.` : 'Delete karne ke liye koi transaction nahi mila.',
+            english: targetCustomerName ? `No transaction found to delete for ${targetCustomerName}.` : 'No transaction found to delete.',
+          });
+        }
+
+        const party = targetTx.partyName || cust?.name || 'Customer';
+        const typeStr = targetTx.type === 'in' ? 'जमा/क्रेडिट' : 'उधार/डेबिट';
 
         const promptDesc = formatLocalizedResponse(userLang, {
-          hindi: `${targetName} का पिछला लेनदेन ₹${txAmount} का है।`,
-          hinglish: `${targetName} ki last transaction ₹${txAmount} ki hai.`,
-          english: `${targetName}'s last transaction was for ₹${txAmount}.`,
+          hindi: `${party} का ₹${targetTx.amount.toLocaleString('en-IN')} का लेनदेन (${typeStr})`,
+          hinglish: `${party} ka ₹${targetTx.amount.toLocaleString('en-IN')} ka transaction (${typeStr})`,
+          english: `Transaction of ₹${targetTx.amount.toLocaleString('en-IN')} for ${party}`,
         });
 
         this.contextManager.setPendingConfirmation({
           action: 'delete_transaction',
-          payload: { transactionId: lastTx?.id || 'last-tx' },
-          message: `${promptDesc}`,
+          payload: { 
+            transactionId: targetTx.id,
+            customerId: targetTx.customerId || cust?.id,
+            partyName: party,
+            amount: targetTx.amount,
+            type: targetTx.type,
+          },
+          message: promptDesc,
           description: promptDesc,
         });
         this.callbacks.onStateChange?.('WAITING_FOR_CONFIRMATION');
 
-        return args.speech_response || ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
+        return formatLocalizedResponse(userLang, {
+          hindi: `${promptDesc} मिला है। क्या मैं इसे हटा दूँ? (हाँ / डिलीट कर दो)`,
+          hinglish: `${promptDesc} mila hai. Kya main ise delete karun? (Haan / Delete kar do)`,
+          english: `Found ${promptDesc}. Would you like me to delete it? (Yes / Delete)`,
+        });
+      }
+
+      if (name === 'get_due_customers') {
+        const res = await this.actionRouter.getDueCustomers({
+          filter: args.filter || 'due',
+          lang: userLang,
+        });
+        return args.speech_response || res.responseText;
+      }
+
+      if (name === 'get_payment_method_summary') {
+        const res = await this.actionRouter.getPaymentSummary({
+          paymentMethod: args.payment_method || 'All',
+          period: args.period || 'today',
+          lang: userLang,
+        });
+        return args.speech_response || res.responseText;
       }
 
       // 4. REPORTS
@@ -661,33 +732,165 @@ export class GeminiLiveManager {
       return res.responseText;
     }
 
-    // 4. Delete transaction intent
-    if (lower.includes('delete') || lower.includes('hata do') || lower.includes('remove') || raw.includes('डिलीट') || raw.includes('हटाओ')) {
-      const targetCustomer = resolvedCust || (this.contextManager.getActiveCustomer() ? allCustomers.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : null);
-      const name = targetCustomer ? targetCustomer.name : 'customer';
-      const lastTx = this.contextManager.getActiveTransaction();
-      const amount = lastTx?.amount || 500;
+    // 4. Delete customer / transaction / reminder intent
+    if (lower.includes('delete') || lower.includes('hata do') || lower.includes('remove') || lower.includes('hatao') || raw.includes('डिलीट') || raw.includes('हटाओ')) {
+      // 4a. Customer deletion
+      if (lower.includes('customer') || raw.includes('ग्राहक') || raw.includes('कस्टमर')) {
+        const targetCust = resolvedCust || (this.contextManager.getActiveCustomer() ? allCustomers.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : allCustomers[0]);
+        if (targetCust) {
+          const promptDesc = formatLocalizedResponse(userLang, {
+            hindi: `कस्टमर ${targetCust.name} (बैलेंस: ₹${targetCust.balance.toLocaleString('en-IN')})`,
+            hinglish: `Customer ${targetCust.name} (Balance: ₹${targetCust.balance.toLocaleString('en-IN')})`,
+            english: `Customer ${targetCust.name} (Balance: ₹${targetCust.balance.toLocaleString('en-IN')})`,
+          });
+          this.contextManager.setPendingConfirmation({
+            action: 'delete_customer',
+            payload: { customerId: targetCust.id },
+            message: promptDesc,
+            description: promptDesc,
+          });
+          this.callbacks.onStateChange?.('WAITING_FOR_CONFIRMATION');
+          return ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
+        }
+      }
 
+      // 4b. Reminder deletion
+      if (lower.includes('reminder') || raw.includes('रिमाइंडर')) {
+        const rems = await this.actionRouter.getReminders(resolvedCust?.name, userLang);
+        if (rems.reminders && rems.reminders.length > 0) {
+          const targetRem = rems.reminders[0];
+          const promptDesc = formatLocalizedResponse(userLang, {
+            hindi: `${targetRem.customerName || 'रिमाइंडर'} (${targetRem.dueDate})`,
+            hinglish: `${targetRem.customerName || 'Reminder'} (${targetRem.dueDate})`,
+            english: `${targetRem.customerName || 'Reminder'} (${targetRem.dueDate})`,
+          });
+          this.contextManager.setPendingConfirmation({
+            action: 'delete_reminder',
+            payload: { reminderId: targetRem.id },
+            message: promptDesc,
+            description: promptDesc,
+          });
+          this.callbacks.onStateChange?.('WAITING_FOR_CONFIRMATION');
+          return ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
+        }
+      }
+
+      // 4c. Real Transaction deletion
+      const allTx = await fetchTransactions();
+      const targetCustomer = resolvedCust || (this.contextManager.getActiveCustomer() ? allCustomers.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : null);
+      
+      let matchingTx: Transaction | undefined;
+      if (targetCustomer) {
+        matchingTx = allTx.find(t => (t.customerId && t.customerId === targetCustomer.id) || (t.partyName && t.partyName.toLowerCase() === targetCustomer.name.toLowerCase()));
+      }
+      if (!matchingTx && this.contextManager.getActiveTransaction()?.id) {
+        matchingTx = allTx.find(t => t.id === this.contextManager.getActiveTransaction()!.id);
+      }
+      if (!matchingTx && allTx.length > 0) {
+        matchingTx = allTx[0];
+      }
+
+      if (!matchingTx) {
+        return formatLocalizedResponse(userLang, {
+          hindi: 'डिलीट करने के लिए कोई लेनदेन नहीं मिला।',
+          hinglish: 'Delete karne ke liye koi transaction nahi mila.',
+          english: 'No transaction found to delete.',
+        });
+      }
+
+      const party = matchingTx.partyName || targetCustomer?.name || 'Customer';
+      const typeStr = matchingTx.type === 'in' ? 'जमा/क्रेडिट' : 'उधार/डेबिट';
       const desc = formatLocalizedResponse(userLang, {
-        hindi: `${name} का पिछला लेनदेन ₹${amount} का है।`,
-        hinglish: `${name} ki last transaction ₹${amount} ki hai.`,
-        english: `${name}'s last transaction was for ₹${amount}.`,
+        hindi: `${party} का ₹${matchingTx.amount.toLocaleString('en-IN')} का लेनदेन (${typeStr})`,
+        hinglish: `${party} ka ₹${matchingTx.amount.toLocaleString('en-IN')} ka transaction (${typeStr})`,
+        english: `Transaction of ₹${matchingTx.amount.toLocaleString('en-IN')} for ${party}`,
       });
 
       this.contextManager.setPendingConfirmation({
         action: 'delete_transaction',
-        payload: { transactionId: lastTx?.id || 'last-tx' },
+        payload: { 
+          transactionId: matchingTx.id,
+          customerId: matchingTx.customerId || targetCustomer?.id,
+          partyName: party,
+          amount: matchingTx.amount,
+          type: matchingTx.type,
+        },
         message: desc,
         description: desc,
       });
+      this.callbacks.onStateChange?.('WAITING_FOR_CONFIRMATION');
 
-      return ConfirmationManager.formatConfirmationPrompt(this.contextManager.getPendingConfirmation()!, userLang);
+      return formatLocalizedResponse(userLang, {
+        hindi: `${desc} मिला है। क्या मैं इसे हटा दूँ? (हाँ / डिलीट करो)`,
+        hinglish: `${desc} mila hai. Kya main ise delete karun? (Haan / Delete kar do)`,
+        english: `Found ${desc}. Would you like me to delete it? (Yes / Delete)`,
+      });
     }
 
-    // 5. Total dues / Market Udhar queries
+    // 5. Total dues / Market Udhar & Pending customer questions
+    if (
+      lower.includes('kitne customer') && (lower.includes('baaki') || lower.includes('baki') || lower.includes('udhar') || lower.includes('pending') || lower.includes('paisa')) ||
+      lower.includes('kiska paisa baaki') || lower.includes('kiska baki') || lower.includes('sabse zyada') ||
+      raw.includes('कितने ग्राहकों का बकाया') || raw.includes('किसका पैसा बाकी') || raw.includes('सबसे ज्यादा किसका')
+    ) {
+      const res = await this.actionRouter.getDueCustomers({ filter: 'due', lang: userLang });
+      return res.responseText;
+    }
+
+    if (lower.includes('zero balance') || lower.includes('chukta') || lower.includes('settled customer') || raw.includes('जीरो बैलेंस') || raw.includes('चुकता')) {
+      const res = await this.actionRouter.getDueCustomers({ filter: 'settled', lang: userLang });
+      return res.responseText;
+    }
+
     if (lower.includes('total udhar') || lower.includes('baki paisa') || lower.includes('market udhar') || lower.includes('pending dues') || raw.includes('कुल उधारी') || raw.includes('बाकी पैसा') || raw.includes('कुल बकाया')) {
       const res = await this.actionRouter.getAccountBalance(userLang);
       return res.responseText;
+    }
+
+    // 5b. Payment Method Specific Inquiries ("UPI se kitna aaya", "Cash mein kitna aaya")
+    if (lower.includes('upi se kitna') || lower.includes('upi payment kitna') || raw.includes('यूपीआई से कितना')) {
+      const res = await this.actionRouter.getPaymentSummary({ paymentMethod: 'UPI', period: 'today', lang: userLang });
+      return res.responseText;
+    }
+    if (lower.includes('cash se kitna') || lower.includes('cash mein kitna') || raw.includes('कैश में कितना')) {
+      const res = await this.actionRouter.getPaymentSummary({ paymentMethod: 'Cash', period: 'today', lang: userLang });
+      return res.responseText;
+    }
+
+    // 5c. Yesterday & Date-specific payment questions ("Kal kitna paisa aaya tha")
+    if (lower.includes('kal kitna') || raw.includes('कल कितना')) {
+      const res = await this.actionRouter.getReport('yesterday', userLang);
+      return res.responseText;
+    }
+
+    // 5d. Pronoun Follow-up for Payment History: "Usse pehle?", "Pehle kab diya tha?"
+    const isPriorPaymentQuestion = lower.includes('usse pehle') || lower.includes('usse pehle kab') || lower.includes('pehle kab') || raw.includes('उससे पहले');
+    if (isPriorPaymentQuestion) {
+      const cust = resolvedCust || (this.contextManager.getActiveCustomer() ? allCustomers.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : null);
+      if (cust) {
+        const res = await this.actionRouter.getTransactions({
+          customerNameOrId: cust.name,
+          type: 'in',
+          offset: 1,
+          limit: 1,
+          lang: userLang,
+        });
+        return res.responseText;
+      }
+    }
+
+    // 5e. Last payment inquiry ("Ravi ne last payment kab ki thi?", "Last payment kab aayi thi")
+    if (lower.includes('last payment') || lower.includes('pichli payment') || lower.includes('payment history') || raw.includes('अंतिम भुगतान') || raw.includes('पिछली पेमेंट')) {
+      const cust = resolvedCust || (this.contextManager.getActiveCustomer() ? allCustomers.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : null);
+      if (cust) {
+        const res = await this.actionRouter.getTransactions({
+          customerNameOrId: cust.name,
+          type: 'in',
+          limit: 1,
+          lang: userLang,
+        });
+        return res.responseText;
+      }
     }
 
     // 6. Balance query intent
@@ -706,21 +909,14 @@ export class GeminiLiveManager {
     }
 
     // 7. Robust Multilingual Transaction Intent & Entity Extraction
-    // Handles all patterns in Hindi, Hinglish, English such as:
-    // "कृपा शंकर के अकाउंट में ₹1000 उधर लिख दो"
-    // "सुरेश के खाते में ₹500 उधार लिखो"
-    // "रमेश को 200 दिए"
-    // "Kripa Shankar ke account mein 1000 udhar likh do"
-    // "Add 1000 udhar to Kripa Shankar"
     const amountMatch = raw.match(/(?:₹|rs\.?|inr|रुपये|रुपए)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:₹|rs\.?|inr|रुपये|रुपए)?/i);
     const hasAmount = !!amountMatch;
     const amount = hasAmount ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0;
 
-    const isDebitIndicator = /\b(udhar|udhari|debit|diya|diye|de\s*do|dedo|dekar|nikasi|gaya)\b|उधर|उधार|उधारी|डेबिट|दिए|दिया|दे\s*दो|देना|काट\s*लो|काटो|माइनस/i.test(raw);
-    const isCreditIndicator = /\b(jama|credit|mila|mili|mile|aaya|aayi|payment|received|jama\s*karo)\b|जमा|क्रेडिट|मिला|मिली|मिले|आया|आई|पेमेंट|पाया/i.test(raw);
+    const financialIntent = detectFinancialIntent(raw);
     const isActionVerb = /\b(likh\s*do|likho|likhiye|likh\s*lo|likha|chadha\s*do|chada\s*do|daal\s*do|dalo|add\s*karo|add\s*kar\s*do|add|jo\s*do|jod\s*do|jodo|darj\s*karo|note\s*karo|entry\s*karo|kar\s*do)\b|लिख\s*दो|लिखो|लिखिए|लिख\s*लो|लिखा|चढ़ा\s*दो|चढ़ाओ|डाल\s*दो|डालो|ऐड\s*करो|ऐड\s*कर\s*दो|जोड़ो|जोड़\s*दो|दर्ज\s*करो|दर्ज\s*कर\s*दो|नोट\s*करो|नोट\s*कर\s*दो|एंट्री\s*करो|एंट्री\s*कर\s*दो|कर\s*दो/i.test(raw);
 
-    const isTransactionCommand = (hasAmount && (isDebitIndicator || isCreditIndicator || isActionVerb)) ||
+    const isTransactionCommand = (hasAmount && (financialIntent === 'PAYMENT_RECEIVED' || financialIntent === 'CREDIT_GIVEN' || isActionVerb)) ||
       lower.includes('add transaction') ||
       lower.includes('add entry') ||
       lower.includes('aur 200 aur') ||
@@ -731,31 +927,34 @@ export class GeminiLiveManager {
       raw.includes('अकाउंट में');
 
     if (isTransactionCommand) {
-      let targetCust = resolvedCust || (this.contextManager.getActiveCustomer() ? allCustomers.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : null);
-      let targetName = targetCust?.name;
+      // 1. Resolve customer strictly using CustomerResolver against database
+      const customerResolution = resolveCustomerAgainstDatabase(raw, allCustomers);
 
-      // Extract customer name if not resolved from context or knownCustomers
-      if (!targetName) {
-        const namePatterns = [
-          /(?:^|अरे|जार्विस|भाई|सुनो|please|hey\s+jarvis)?\s*([a-zA-Z\s\u0900-\u097F]+?)\s*(?:के|की|का|ke|ki|ka)\s*(?:अकाउंट|खाते|खाता|account|khata|name|naam)?\s*(?:में|पे|पर|mein|me)/i,
-          /(?:^|अरे|जार्विस|भाई|सुनो|please|hey\s+jarvis)?\s*([a-zA-Z\s\u0900-\u097F]+?)\s*(?:को|se|से|pe|पे|पर)\s*(?:₹|\d+|उधर|उधार|जमा)/i,
-          /(?:to|for|in|naam|नाम|नाम\s*pe|नाम\s*पर)\s+([a-zA-Z\s\u0900-\u097F]+?)(?:'s|\s+ke|\s+के|\s+account|\s+khata|\s+अकाउंट|\s+खाते)?$/i,
-        ];
-        for (const pat of namePatterns) {
-          const match = raw.match(pat);
-          if (match && match[1]) {
-            let extracted = match[1].replace(/^(hey\s+jarvis|jarvis|bhai|are|sun|suno|please|zara|ek|naya|new)\s*/i, '').trim();
-            extracted = extracted.replace(/[0-9₹,\.]+/g, '').trim();
-            const reserved = ['account', 'khata', 'customer', 'grahak', 'khatabook', 'entry', 'balance', 'अकाउंट', 'खाता', 'खाते', 'कस्टमर', 'ग्राहक', 'एंट्री', 'उधार', 'उधर', 'जमा', 'uske', 'usmein'];
-            if (extracted.length >= 2 && !reserved.includes(extracted.toLowerCase())) {
-              targetName = extracted;
-              break;
-            }
-          }
+      if (customerResolution.status === 'AMBIGUOUS' && customerResolution.candidates && customerResolution.candidates.length > 1) {
+        const candidateNames = customerResolution.candidates.map(c => c.name).join(', ');
+        return formatLocalizedResponse(userLang, {
+          hindi: `${customerResolution.searchedName || 'कस्टमर'} नाम के ${customerResolution.candidates.length} कस्टमर्स मिल रहे हैं (${candidateNames})। आप किस ग्राहक की बात कर रहे हैं?`,
+          hinglish: `${customerResolution.searchedName || 'Customer'} naam ke ${customerResolution.candidates.length} customers mil rahe hain (${candidateNames}). Kis customer ki baat kar rahe hain?`,
+          english: `Found ${customerResolution.candidates.length} customers matching "${customerResolution.searchedName || 'customer'}" (${candidateNames}). Which one do you mean?`,
+        });
+      }
+
+      let targetCustomer: Customer | undefined = customerResolution.customer || resolvedCust || (this.contextManager.getActiveCustomer() ? allCustomers.find(c => c.id === this.contextManager.getActiveCustomer()?.id) : undefined);
+
+      // If customer name was mentioned in speech but is NOT found in DB, DO NOT create one automatically!
+      if (!targetCustomer && customerResolution.status === 'NOT_FOUND') {
+        const cleanName = cleanExtractedCustomerName(customerResolution.searchedName || '');
+        if (cleanName && cleanName.length >= 2 && !['account', 'khata', 'customer', 'entry'].includes(cleanName.toLowerCase())) {
+          return formatLocalizedResponse(userLang, {
+            hindi: `"${cleanName}" कस्टमर लिस्ट में नहीं मिल रहे। क्या आप उन्हें नया कस्टमर बनाना चाहते हैं?`,
+            hinglish: `"${cleanName}" customer list mein nahi mil rahe. Kya aap unhe naya customer banana chahte hain?`,
+            english: `"${cleanName}" was not found in the customer list. Would you like to add them as a new customer?`,
+          });
         }
       }
 
       if (!hasAmount) {
+        const targetName = targetCustomer?.name || 'खाता';
         this.contextManager.setPendingSlotFilling({
           action: 'add_transaction',
           missingFields: ['amount', 'transaction_type'],
@@ -763,17 +962,19 @@ export class GeminiLiveManager {
           promptQuestion: 'Kitne rupaye?',
         });
         return formatLocalizedResponse(userLang, {
-          hindi: `${targetName ? targetName + ' के खाते में ' : ''}कितने रुपये लिखने हैं?`,
-          hinglish: `${targetName ? targetName + ' ke account mein ' : ''}Kitne rupaye likhne hain?`,
-          english: `How much amount to record${targetName ? ' for ' + targetName : ''}?`,
+          hindi: `${targetCustomer ? targetCustomer.name + ' के खाते में ' : ''}कितने रुपये लिखने हैं?`,
+          hinglish: `${targetCustomer ? targetCustomer.name + ' ke account mein ' : ''}Kitne rupaye likhne hain?`,
+          english: `How much amount to record${targetCustomer ? ' for ' + targetCustomer.name : ''}?`,
         });
       }
 
-      // Determine transaction type: udhar/उधर/उधार -> debit, jama/जमा -> credit
-      const transactionType = isDebitIndicator ? 'debit' : 'credit';
+      // Determine transaction type:
+      // PAYMENT_RECEIVED (customer pays, "minus karke batao", "aa chuka hai", "de diye", "jama") -> credit (decreases balance)
+      // CREDIT_GIVEN (udhar diya, saman diya, debit) -> debit (increases balance)
+      const transactionType: 'credit' | 'debit' = financialIntent === 'CREDIT_GIVEN' ? 'debit' : 'credit';
 
       const res = await this.actionRouter.addTransaction({
-        customerNameOrId: targetName || 'खाता',
+        customerNameOrId: targetCustomer ? targetCustomer.name : 'खाता',
         amount,
         transactionType,
         lang: userLang,
@@ -782,12 +983,14 @@ export class GeminiLiveManager {
       if (res.customer) {
         this.contextManager.setActiveCustomer(res.customer);
       }
-      this.contextManager.setActiveTransaction({
-        id: res.transaction.id,
-        amount: res.transaction.amount,
-        description: res.transaction.description,
-        type: res.transaction.type === 'in' ? 'credit' : 'debit',
-      });
+      if (res.transaction) {
+        this.contextManager.setActiveTransaction({
+          id: res.transaction.id,
+          amount: res.transaction.amount,
+          description: res.transaction.description,
+          type: res.transaction.type === 'in' ? 'credit' : 'debit',
+        });
+      }
       return res.responseText;
     }
 

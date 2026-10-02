@@ -114,14 +114,13 @@ export async function addTransactionApi(tx: {
 export async function deleteTransactionApi(id: string): Promise<boolean> {
   try {
     await apiRequest(`/api/transactions/${id}`, { method: 'DELETE' });
-    return true;
-  } catch {
-    const all = await fetchTransactions();
-    const updated = all.filter(t => t.id !== id);
-    localStorage.setItem('notibook_transactions', JSON.stringify(updated));
-    return true;
-  }
+  } catch {}
+  const all = await fetchTransactions();
+  const updated = all.filter(t => t.id !== id);
+  localStorage.setItem('notibook_transactions', JSON.stringify(updated));
+  return true;
 }
+
 
 export async function updateTransactionApi(id: string, updates: Partial<Transaction>): Promise<Transaction | null> {
   try {
