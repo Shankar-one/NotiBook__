@@ -32,6 +32,10 @@ export type StrictVoiceIntent =
   | 'CANCEL_LAST_ACTION'
   | 'MODIFY_PENDING'
   | 'END_CONVERSATION'
+  | 'CREATE_SALE'
+  | 'GET_STOCK'
+  | 'GET_PRODUCT_PRICE'
+  | 'ADJUST_STOCK'
   | 'UNKNOWN';
 
 export interface StructuredVoiceInterpretation {

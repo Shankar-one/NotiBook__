@@ -5,9 +5,9 @@ import {
   BookOpen, 
   Settings, 
   Mic, 
-  ChevronLeft,
+  ChevronLeft, 
   ChevronRight,
-  Store
+  LogOut 
 } from 'lucide-react';
 import { ShopSettings } from '../types';
 
@@ -19,6 +19,8 @@ interface SidebarProps {
   settings: ShopSettings;
   collapsed: boolean;
   setCollapsed: (val: boolean) => void;
+  onLogout?: () => void;
+  user?: any;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -29,7 +31,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
   settings,
   collapsed,
   setCollapsed,
+  onLogout,
+  user,
 }) => {
+  const displayName = user?.user_metadata?.full_name || user?.user_metadata?.name || settings.merchantName || 'Merchant';
+  const displayEmail = user?.email || settings.category || 'Hardware & Paints';
+  const userInitials = displayName
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((s: string) => s[0].toUpperCase())
+    .join('') || 'NB';
+
   return (
     <aside 
       className={`fixed top-0 bottom-0 left-0 z-30 flex flex-col bg-[#FAF7F2] border-r border-[#EFE9DF] transition-all duration-300 ease-in-out ${
@@ -146,25 +159,45 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </button>
 
         {/* User Card */}
-        <div 
-          onClick={onOpenSettings}
-          className={`flex items-center gap-3 p-2 rounded-xl cursor-pointer hover:bg-[#F2ECE2] transition-colors ${
-            collapsed ? 'justify-center' : ''
-          }`}
-        >
-          <div className="flex items-center justify-center w-9 h-9 rounded-full bg-[#1C232B] text-white text-xs font-bold shrink-0">
-            KS
+        <div className="flex items-center justify-between gap-1">
+          <div 
+            onClick={onOpenSettings}
+            className={`flex items-center gap-3 p-2 rounded-xl cursor-pointer hover:bg-[#F2ECE2] transition-colors flex-1 min-w-0 ${
+              collapsed ? 'justify-center' : ''
+            }`}
+          >
+            {user?.user_metadata?.avatar_url ? (
+              <img
+                src={user.user_metadata.avatar_url}
+                alt={displayName}
+                className="w-9 h-9 rounded-full object-cover shrink-0 border border-[#EFE9DF]"
+              />
+            ) : (
+              <div className="flex items-center justify-center w-9 h-9 rounded-full bg-[#1C232B] text-white text-xs font-bold shrink-0">
+                {userInitials}
+              </div>
+            )}
+            {!collapsed && (
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-semibold text-[#1E232A] truncate">
+                  {displayName}
+                </div>
+                <div className="flex items-center gap-1.5 text-xs text-[#8C827A] truncate">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span>
+                  <span className="truncate">{displayEmail}</span>
+                </div>
+              </div>
+            )}
           </div>
-          {!collapsed && (
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-semibold text-[#1E232A] truncate">
-                {settings.merchantName || 'Kripashankar'}
-              </div>
-              <div className="flex items-center gap-1.5 text-xs text-[#8C827A] truncate">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span>
-                <span>{settings.category || 'Hardware & Paints'}</span>
-              </div>
-            </div>
+
+          {onLogout && !collapsed && (
+            <button
+              onClick={onLogout}
+              className="p-2 text-[#8C827A] hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+              title="Sign Out"
+            >
+              <LogOut size={16} />
+            </button>
           )}
         </div>
       </div>

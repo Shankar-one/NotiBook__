@@ -28,6 +28,9 @@ export interface BillItem {
   price: number;
   total: number;
   productId?: string;
+  sku?: string;
+  unit?: string;
+  availableStock?: number;
 }
 
 export type PaymentMethod = 'Cash' | 'UPI' | 'Card' | 'Bank Transfer' | 'Bank' | 'Cheque' | 'Credit' | 'Other';
@@ -51,6 +54,7 @@ export interface Invoice {
   paymentMode: PaymentMethod;
   paymentStatus: 'Paid' | 'Draft' | 'Due' | 'Partial' | 'Cancelled';
   notes?: string;
+  receiptFormat?: '80mm' | '58mm';
 }
 
 export interface Transaction {
@@ -73,10 +77,11 @@ export interface StockMovement {
   productId: string;
   productName: string;
   changeQty: number; // e.g. -2 for sale, +20 for purchase
-  reason: 'SALE' | 'PURCHASE' | 'ADJUSTMENT' | 'RETURN';
+  reason: 'SALE' | 'PURCHASE' | 'ADJUSTMENT' | 'RETURN' | 'CATALOGUE_IMPORT';
   referenceId?: string; // invoiceId or description
   date: string;
   finalQty: number;
+  user?: string;
 }
 
 export interface Product {
@@ -89,6 +94,29 @@ export interface Product {
   sellPrice: number;
   unit: string;
   sku?: string;
+  taxPercent?: number;
+  description?: string;
+  active?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CatalogueImportProduct {
+  id?: string;
+  name: string;
+  sellingPrice: number;
+  stockQty: number;
+  category?: string;
+  unit?: string;
+  sku?: string;
+  buyPrice?: number;
+  isExisting?: boolean;
+  existingId?: string;
+  existingPrice?: number;
+  existingStock?: number;
+  priceChanged?: boolean;
+  stockChanged?: boolean;
+  validationError?: string;
 }
 
 export interface ShopSettings {
@@ -100,4 +128,5 @@ export interface ShopSettings {
   gstNumber: string;
   currencySymbol: string;
   defaultTaxRate: number;
+  receiptFormat?: '80mm' | '58mm';
 }

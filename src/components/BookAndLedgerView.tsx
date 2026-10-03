@@ -29,6 +29,11 @@ interface BookAndLedgerViewProps {
   onTogglePopulatedState: () => void;
   onExportBook: () => void;
   onDeleteTransaction?: (id: string) => void;
+  onOpenPdfImport?: () => void;
+  onOpenStockHistory?: (productId?: string) => void;
+  onOpenStockAdjust?: (product?: Product) => void;
+  onEditProduct?: (product: Product) => void;
+  onOpenSalesReturn?: (invoice: Invoice) => void;
 }
 
 export const BookAndLedgerView: React.FC<BookAndLedgerViewProps> = ({
@@ -50,10 +55,15 @@ export const BookAndLedgerView: React.FC<BookAndLedgerViewProps> = ({
   onTogglePopulatedState,
   onExportBook,
   onDeleteTransaction,
+  onOpenPdfImport,
+  onOpenStockHistory,
+  onOpenStockAdjust,
+  onEditProduct,
+  onOpenSalesReturn,
 }) => {
   return (
     <div className="max-w-5xl mx-auto space-y-6 pb-12">
-      {/* Top Header matching Images 3, 4, 5 */}
+      {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <span className="text-[11px] font-bold uppercase tracking-wider text-[#A0988F] block">
@@ -63,7 +73,7 @@ export const BookAndLedgerView: React.FC<BookAndLedgerViewProps> = ({
             Your Book
           </h1>
           <p className="text-sm text-[#655E57] mt-0.5">
-            Sales, billing, expenses, stock, and the story between them.
+            PDF Catalogue, billing, expenses, inventory stock, and thermal receipts.
           </p>
         </div>
 
@@ -76,11 +86,11 @@ export const BookAndLedgerView: React.FC<BookAndLedgerViewProps> = ({
         </button>
       </div>
 
-      {/* Subtabs matching Images 3, 4, 5 */}
+      {/* Subtabs: Billing, Transactions, Stocks (Catalogue) */}
       <div className="flex items-center p-1 bg-[#EFE9DF]/50 rounded-2xl border border-[#EFE9DF] max-w-md">
         <button
           onClick={() => setActiveSubtab('billing')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${
+          className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
             activeSubtab === 'billing'
               ? 'bg-white text-[#E85D43] shadow-xs'
               : 'text-[#655E57] hover:text-[#1E232A]'
@@ -92,7 +102,7 @@ export const BookAndLedgerView: React.FC<BookAndLedgerViewProps> = ({
 
         <button
           onClick={() => setActiveSubtab('transactions')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${
+          className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
             activeSubtab === 'transactions'
               ? 'bg-white text-[#E85D43] shadow-xs'
               : 'text-[#655E57] hover:text-[#1E232A]'
@@ -104,14 +114,14 @@ export const BookAndLedgerView: React.FC<BookAndLedgerViewProps> = ({
 
         <button
           onClick={() => setActiveSubtab('stocks')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${
+          className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
             activeSubtab === 'stocks'
               ? 'bg-white text-[#E85D43] shadow-xs'
               : 'text-[#655E57] hover:text-[#1E232A]'
           }`}
         >
           <Package size={15} />
-          <span>Stocks</span>
+          <span>Catalogue & Stock</span>
         </button>
       </div>
 
@@ -125,6 +135,7 @@ export const BookAndLedgerView: React.FC<BookAndLedgerViewProps> = ({
           onFinalizeBill={onFinalizeBill}
           onOpenInvoiceModal={onOpenInvoiceModal}
           isPopulatedState={isPopulatedState}
+          onOpenSalesReturn={onOpenSalesReturn}
         />
       )}
 
@@ -149,6 +160,10 @@ export const BookAndLedgerView: React.FC<BookAndLedgerViewProps> = ({
           onImportSampleProducts={onImportSampleProducts}
           isPopulatedState={isPopulatedState}
           onTogglePopulatedState={onTogglePopulatedState}
+          onOpenPdfImport={onOpenPdfImport}
+          onOpenStockHistory={onOpenStockHistory}
+          onOpenStockAdjust={onOpenStockAdjust}
+          onEditProduct={onEditProduct}
         />
       )}
     </div>

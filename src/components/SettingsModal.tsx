@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Settings, Store, Save, Download, RotateCcw } from 'lucide-react';
+import { X, Settings, Store, Save, Download, RotateCcw, LogOut, User as UserIcon } from 'lucide-react';
 import { ShopSettings } from '../types';
 
 interface SettingsModalProps {
@@ -11,6 +11,8 @@ interface SettingsModalProps {
   onExportData: () => void;
   isPopulatedState: boolean;
   onTogglePopulatedState: () => void;
+  onLogout?: () => void;
+  user?: any;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -22,6 +24,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onExportData,
   isPopulatedState,
   onTogglePopulatedState,
+  onLogout,
+  user,
 }) => {
   const [formData, setFormData] = useState<ShopSettings>({ ...settings });
 
@@ -225,6 +229,52 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </button>
             </div>
           </div>
+
+          {/* Connected Google Account & Session */}
+          {user && (
+            <div className="pt-3 border-t border-[#EFE9DF] space-y-2">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-[#A0988F] block">
+                Authenticated Account
+              </span>
+              <div className="flex items-center justify-between p-3 rounded-2xl bg-[#FAF7F2] border border-[#EFE9DF]">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  {user.user_metadata?.avatar_url ? (
+                    <img
+                      src={user.user_metadata.avatar_url}
+                      alt="Profile"
+                      className="w-8 h-8 rounded-full object-cover shrink-0 border border-[#EFE9DF]"
+                    />
+                  ) : (
+                    <div className="w-8 h-8 rounded-full bg-[#1C232B] text-white flex items-center justify-center text-xs font-bold shrink-0">
+                      <UserIcon size={14} />
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-[#1E232A] truncate">
+                      {user.user_metadata?.full_name || user.user_metadata?.name || 'Google User'}
+                    </p>
+                    <p className="text-[11px] text-[#8C827A] truncate">
+                      {user.email}
+                    </p>
+                  </div>
+                </div>
+
+                {onLogout && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onLogout();
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200/80 transition-colors cursor-pointer shrink-0"
+                  >
+                    <LogOut size={13} />
+                    <span>Sign Out</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
 
           <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#EFE9DF]">
             <button

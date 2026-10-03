@@ -35,3 +35,50 @@
 .animate-pulse-subtle {
   animation: pulse-subtle 2s infinite ease-in-out;
 }
+
+/* ==========================================================================
+   Dedicated Thermal Receipt Printing Styles (Requirement 11 & 12)
+   Hide all web UI, headers, sidebars, modals and print only the thermal receipt.
+   ========================================================================== */
+@media print {
+  /* Hide all application elements */
+  body * {
+    visibility: hidden !important;
+  }
+
+  /* Reveal only the thermal receipt container */
+  #thermal-receipt-printable,
+  #thermal-receipt-printable * {
+    visibility: visible !important;
+  }
+
+  /* Position receipt at the exact top-left corner of the thermal roll */
+  #thermal-receipt-printable {
+    position: fixed !important;
+    left: 0 !important;
+    top: 0 !important;
+    margin: 0 !important;
+    padding: 2mm 3mm !important;
+    box-shadow: none !important;
+    border: none !important;
+    background: white !important;
+    color: black !important;
+    display: block !important;
+  }
+
+  .receipt-58mm {
+    width: 58mm !important;
+    max-width: 58mm !important;
+  }
+
+  .receipt-80mm {
+    width: 80mm !important;
+    max-width: 80mm !important;
+  }
+
+  @page {
+    margin: 0 !important;
+    size: auto !important;
+  }
+}
+

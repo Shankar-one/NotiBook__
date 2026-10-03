@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { Session, User } from '@supabase/supabase-js';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
 import { HomeDashboard } from './components/HomeDashboard';
@@ -16,8 +17,15 @@ import { CustomerLedgerModal } from './components/CustomerLedgerModal';
 import { InvoicePrintModal } from './components/InvoicePrintModal';
 import { SettingsModal } from './components/SettingsModal';
 import { SearchModal } from './components/SearchModal';
+import { PdfCatalogueImportModal } from './components/PdfCatalogueImportModal';
+import { StockHistoryModal } from './components/StockHistoryModal';
+import { StockAdjustModal } from './components/StockAdjustModal';
+import { EditProductModal } from './components/EditProductModal';
+import { SalesReturnModal } from './components/SalesReturnModal';
 import { JarvisHUD } from './components/JarvisHUD';
 import { MicrophonePermissionPrompt } from './components/MicrophonePermissionPrompt';
+import { LoginPage } from './components/LoginPage';
+import { getSupabaseSession, subscribeToAuthChanges, signOutUser } from './lib/supabase';
 import { voiceSession } from './voice';
 import { 
   Customer, 
@@ -25,7 +33,9 @@ import {
   Product, 
   ShopSettings, 
   Transaction, 
-  CustomerTransaction 
+  CustomerTransaction,
+  StockMovement,
+  CatalogueImportProduct
 } from './types';
 import { 
   defaultShopSettings, 
@@ -41,6 +51,11 @@ import { fetchProducts } from './api/products';
 import { fetchInvoices } from './api/invoices';
 
 export default function App() {
+  // Authentication State
+  const [session, setSession] = useState<Session | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
+
   // Navigation State
   const [activeTab, setActiveTab] = useState<'home' | 'customers' | 'book'>('home');
   const [activeBookSubtab, setActiveBookSubtab] = useState<'billing' | 'transactions' | 'stocks'>('billing');
@@ -85,6 +100,14 @@ export default function App() {
     return saved ? JSON.parse(saved) : sampleInvoices;
   });
 
+  const [stockMovements, setStockMovements] = useState<StockMovement[]>(() => {
+    const saved = localStorage.getItem('notibook_stock_movements');
+    return saved ? JSON.parse(saved) : [
+      { id: 'sm-1', productId: 'prod-1', productName: 'Classmate Deluxe Notebook 240p', changeQty: -3, reason: 'SALE', referenceId: '#INV-1001', date: '2024-06-18', finalQty: 85 },
+      { id: 'sm-2', productId: 'prod-2', productName: 'Reynolds Ballpoint Pen Blue (Pack of 10)', changeQty: -2, reason: 'SALE', referenceId: '#INV-1001', date: '2024-06-18', finalQty: 40 },
+    ];
+  });
+
   // Modal States
   const [isAddCustomerOpen, setIsAddCustomerOpen] = useState(false);
   const [isAddTxOpen, setIsAddTxOpen] = useState(false);
@@ -94,6 +117,22 @@ export default function App() {
   const [viewingInvoice, setViewingInvoice] = useState<Invoice | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+
+  // New Catalogue, Stock Audit & Return Modal States
+  const [isPdfImportOpen, setIsPdfImportOpen] = useState(false);
+  const [isStockHistoryOpen, setIsStockHistoryOpen] = useState(false);
+  const [historyProductId, setHistoryProductId] = useState<string | undefined>(undefined);
+  const [isStockAdjustOpen, setIsStockAdjustOpen] = useState(false);
+  const [adjustTargetProduct, setAdjustTargetProduct] = useState<Product | null>(null);
+  const [isEditProductOpen, setIsEditProductOpen] = useState(false);
+  const [editTargetProduct, setEditTargetProduct] = useState<Product | null>(null);
+  const [isSalesReturnOpen, setIsSalesReturnOpen] = useState(false);
+  const [returnTargetInvoice, setReturnTargetInvoice] = useState<Invoice | null>(null);
+
+  // Sync back to localStorage
+  useEffect(() => {
+    localStorage.setItem('notibook_stock_movements', JSON.stringify(stockMovements));
+  }, [stockMovements]);
 
   // Sync back to localStorage
   useEffect(() => {
@@ -128,6 +167,66 @@ export default function App() {
       voiceSession.getContextManager().setActiveCustomer(selectedCustomerForLedger);
     }
   }, [activeTab, activeBookSubtab, selectedCustomerForLedger]);
+
+  // Initialize and persist Supabase Authentication session
+  useEffect(() => {
+    let isMounted = true;
+
+    async function initAuth() {
+      try {
+        const initialSession = await getSupabaseSession();
+        if (isMounted) {
+          setSession(initialSession);
+          setUser(initialSession?.user ?? null);
+          setAuthLoading(false);
+
+          // Clean up URL if arriving back from OAuth redirect
+          if (
+            window.location.pathname === '/auth/callback' || 
+            window.location.hash.includes('access_token=') || 
+            window.location.search.includes('code=')
+          ) {
+            window.history.replaceState(null, '', '/');
+          }
+        }
+      } catch (err) {
+        console.warn('[Auth] Session initialization:', err);
+        if (isMounted) setAuthLoading(false);
+      }
+    }
+
+    void initAuth();
+
+    const unsubscribe = subscribeToAuthChanges((newSession, newUser) => {
+      if (isMounted) {
+        setSession(newSession);
+        setUser(newUser);
+        setAuthLoading(false);
+
+        if (newSession && (
+          window.location.pathname === '/auth/callback' || 
+          window.location.hash.includes('access_token=') ||
+          window.location.search.includes('code=')
+        )) {
+          window.history.replaceState(null, '', '/');
+        }
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, []);
+
+  const handleLogout = async () => {
+    try {
+      await signOutUser();
+    } finally {
+      setSession(null);
+      setUser(null);
+    }
+  };
 
   // Refs for callbacks
   const customersRef = React.useRef(customers);
@@ -740,18 +839,34 @@ export default function App() {
     setInvoices(prev => [newInvoice, ...prev]);
     setIsPopulatedState(true);
 
-    // Atomically decrease stock for each invoiced product
+    // Atomically decrease stock for each invoiced product & record audit movements
+    const newMovements: StockMovement[] = [];
     setProducts(prev => {
       const updated = prev.map(p => {
         const item = newInvoice.items.find(i => (i.productId && i.productId === p.id) || i.name.toLowerCase() === p.name.toLowerCase());
         if (item) {
-          return { ...p, stockQty: Math.max(0, p.stockQty - item.qty) };
+          const finalQty = Math.max(0, p.stockQty - item.qty);
+          newMovements.push({
+            id: `sm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            productId: p.id,
+            productName: p.name,
+            changeQty: -item.qty,
+            reason: 'SALE',
+            referenceId: `Sale via ${newInvoice.invoiceNumber} to ${newInvoice.customerName}`,
+            date: newInvoice.date || new Intl.DateTimeFormat('en-CA').format(new Date()),
+            finalQty,
+          });
+          return { ...p, stockQty: finalQty };
         }
         return p;
       });
       localStorage.setItem('notibook_products', JSON.stringify(updated));
       return updated;
     });
+
+    if (newMovements.length > 0) {
+      setStockMovements(prev => [...newMovements, ...prev]);
+    }
 
     const isCredit = newInvoice.paymentMode === 'Credit' || (newInvoice.paidAmount !== undefined && newInvoice.paidAmount === 0);
     const paidAmt = newInvoice.paidAmount !== undefined ? newInvoice.paidAmount : (isCredit ? 0 : newInvoice.grandTotal);
@@ -850,6 +965,259 @@ export default function App() {
         return updated;
       });
     }
+  };
+
+  // Handle PDF Catalogue Import Success (Requirement 1 & 10)
+  const handlePdfImportSuccess = (items: CatalogueImportProduct[]) => {
+    setIsPopulatedState(true);
+    setProducts(prev => {
+      const updated = [...prev];
+      const newMovements: StockMovement[] = [];
+
+      for (const item of items) {
+        if (!item.name || Number(item.sellingPrice) <= 0) continue;
+        const norm = item.name.toLowerCase().trim();
+        const existingIdx = updated.findIndex(p => 
+          (item.id && p.id === item.id) || 
+          p.name.toLowerCase().trim() === norm ||
+          (item.sku && p.sku && item.sku.toLowerCase() === p.sku.toLowerCase())
+        );
+
+        const price = Number(item.sellingPrice) || 0;
+        const stock = Number(item.stockQty) || 0;
+
+        if (existingIdx >= 0) {
+          const prevStock = updated[existingIdx].stockQty;
+          updated[existingIdx] = {
+            ...updated[existingIdx],
+            sellPrice: price > 0 ? price : updated[existingIdx].sellPrice,
+            stockQty: stock,
+            category: item.category || updated[existingIdx].category,
+            unit: item.unit || updated[existingIdx].unit,
+            sku: item.sku || updated[existingIdx].sku,
+            updatedAt: new Date().toISOString().slice(0, 10),
+          };
+
+          const delta = stock - prevStock;
+          if (delta !== 0) {
+            newMovements.push({
+              id: `sm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              productId: updated[existingIdx].id,
+              productName: updated[existingIdx].name,
+              changeQty: delta,
+              reason: 'CATALOGUE_IMPORT',
+              referenceId: `PDF Import update: ${prevStock} → ${stock}`,
+              date: new Intl.DateTimeFormat('en-CA').format(new Date()),
+              finalQty: stock,
+            });
+          }
+        } else {
+          const newProd: Product = {
+            id: `prod-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            name: item.name.trim(),
+            category: item.category || 'General',
+            stockQty: stock,
+            lowStockThreshold: 10,
+            buyPrice: Number(item.buyPrice) || Math.round(price * 0.75),
+            sellPrice: price,
+            unit: item.unit || 'pcs',
+            sku: item.sku || `SKU-${Date.now().toString().slice(-4)}`,
+            createdAt: new Intl.DateTimeFormat('en-CA').format(new Date()),
+            updatedAt: new Intl.DateTimeFormat('en-CA').format(new Date()),
+          };
+          updated.unshift(newProd);
+
+          newMovements.push({
+            id: `sm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            productId: newProd.id,
+            productName: newProd.name,
+            changeQty: stock,
+            reason: 'CATALOGUE_IMPORT',
+            referenceId: 'Initial stock from PDF catalogue import',
+            date: new Intl.DateTimeFormat('en-CA').format(new Date()),
+            finalQty: stock,
+          });
+        }
+      }
+
+      if (newMovements.length > 0) {
+        setStockMovements(prevSm => [...newMovements, ...prevSm]);
+      }
+      localStorage.setItem('notibook_products', JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  // Handle Sales Return (Requirement 14)
+  const handleSalesReturn = async (params: {
+    invoiceId: string;
+    items: { productId?: string; name: string; qty: number; price: number }[];
+    returnReason?: string;
+  }) => {
+    const inv = invoices.find(i => i.id === params.invoiceId);
+    if (!inv) return;
+
+    let totalRefund = 0;
+    const returnMovements: StockMovement[] = [];
+
+    // Increase stock for returned items
+    setProducts(prev => {
+      const updated = prev.map(p => {
+        const retItem = params.items.find(ri => (ri.productId && ri.productId === p.id) || ri.name.toLowerCase() === p.name.toLowerCase());
+        if (retItem && retItem.qty > 0) {
+          const newStock = p.stockQty + retItem.qty;
+          returnMovements.push({
+            id: `sm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            productId: p.id,
+            productName: p.name,
+            changeQty: retItem.qty,
+            reason: 'RETURN',
+            referenceId: `Return on ${inv.invoiceNumber}: ${params.returnReason || 'Customer return'}`,
+            date: new Intl.DateTimeFormat('en-CA').format(new Date()),
+            finalQty: newStock,
+          });
+          return { ...p, stockQty: newStock };
+        }
+        return p;
+      });
+      localStorage.setItem('notibook_products', JSON.stringify(updated));
+      return updated;
+    });
+
+    for (const ri of params.items) {
+      totalRefund += ri.price * ri.qty;
+    }
+
+    if (returnMovements.length > 0) {
+      setStockMovements(prev => [...returnMovements, ...prev]);
+    }
+
+    // Adjust customer ledger balance if customer is attached
+    if (inv.customerName && inv.customerName.toLowerCase() !== 'walk-in customer' && totalRefund > 0) {
+      let custId = inv.customerId;
+      setCustomers(prev => {
+        const idx = prev.findIndex(c => (inv.customerId && c.id === inv.customerId) || c.name.toLowerCase() === inv.customerName.toLowerCase());
+        if (idx >= 0) {
+          const cust = prev[idx];
+          custId = cust.id;
+          const newBal = Math.max(0, cust.balance - totalRefund);
+          const updatedCust: Customer = {
+            ...cust,
+            balance: newBal,
+            status: newBal > 0 ? 'due' : 'settled',
+            lastTransactionDate: new Intl.DateTimeFormat('en-CA').format(new Date()),
+          };
+          const updated = [...prev];
+          updated[idx] = updatedCust;
+          localStorage.setItem('notibook_customers', JSON.stringify(updated));
+          return updated;
+        }
+        return prev;
+      });
+
+      if (custId) {
+        const returnCtx: CustomerTransaction = {
+          id: `ctx-${Date.now()}-ret`,
+          customerId: custId,
+          type: 'got',
+          amount: totalRefund,
+          date: new Intl.DateTimeFormat('en-CA').format(new Date()),
+          note: `Sales Return on ${inv.invoiceNumber} (${params.returnReason || 'Exchange/Refund'})`,
+          billId: inv.id,
+        };
+        setCustomerTransactions(prev => ({
+          ...prev,
+          [custId!]: [returnCtx, ...(prev[custId!] || [])],
+        }));
+      }
+    }
+
+    // Record refund financial transaction
+    if (totalRefund > 0) {
+      const refundTx: Transaction = {
+        id: `tx-${Date.now()}`,
+        date: new Intl.DateTimeFormat('en-IN', {
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+        }).format(new Date()),
+        type: 'out',
+        direction: 'OUTGOING',
+        category: 'Refund',
+        description: `Sales return refund for ${inv.invoiceNumber}`,
+        partyName: inv.customerName,
+        paymentMode: inv.paymentMode,
+        amount: totalRefund,
+        invoiceId: inv.id,
+      };
+      setTransactions(prev => [refundTx, ...prev]);
+    }
+
+    // Call server API for persistence
+    try {
+      await fetch('/api/sales/return', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      });
+    } catch {}
+  };
+
+  // Handle Manual Stock Adjustment (Requirement 7)
+  const handleManualStockAdjust = (params: {
+    productId: string;
+    newQty: number;
+    reason: 'ADJUSTMENT' | 'PURCHASE' | 'SALE' | 'RETURN';
+    notes?: string;
+  }) => {
+    setProducts(prev => {
+      const updated = prev.map(p => {
+        if (p.id === params.productId) {
+          const delta = params.newQty - p.stockQty;
+          const sm: StockMovement = {
+            id: `sm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            productId: p.id,
+            productName: p.name,
+            changeQty: delta,
+            reason: params.reason,
+            referenceId: params.notes || `Stock adjusted from ${p.stockQty} to ${params.newQty}`,
+            date: new Intl.DateTimeFormat('en-CA').format(new Date()),
+            finalQty: params.newQty,
+          };
+          setStockMovements(prevSm => [sm, ...prevSm]);
+          return { ...p, stockQty: params.newQty };
+        }
+        return p;
+      });
+      localStorage.setItem('notibook_products', JSON.stringify(updated));
+      return updated;
+    });
+
+    try {
+      void fetch('/api/stock/adjust', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      });
+    } catch {}
+  };
+
+  // Handle Edit Product (Requirement 3 & 9)
+  const handleSaveProductEdit = (updatedProduct: Product) => {
+    setProducts(prev => {
+      const updated = prev.map(p => p.id === updatedProduct.id ? updatedProduct : p);
+      localStorage.setItem('notibook_products', JSON.stringify(updated));
+      return updated;
+    });
+    try {
+      void fetch(`/api/products/${updatedProduct.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedProduct),
+      });
+    } catch {}
   };
 
   // Customer Khatabook Transaction (Gave / Got)
@@ -967,6 +1335,44 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  // 1. Initial Auth Loading State: smooth branded splash screen
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#FAF7F2] flex flex-col items-center justify-center p-6 text-[#1E232A]">
+        <div className="flex flex-col items-center gap-4">
+          <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-[#E85D43] text-white shadow-lg shadow-[#E85D43]/25 animate-pulse">
+            <svg className="w-8 h-8 fill-current" viewBox="0 0 24 24">
+              <path d="M19 2H6c-1.2 0-2.4.6-3 1.7C2.4 4.8 2 6.3 2 8v11c0 1.1.9 2 2 2h15c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-1 16H5c-.6 0-1-.4-1-1s.4-1 1-1h13v2zm0-4H5c-.6 0-1-.4-1-1s.4-1 1-1h13v2zm0-4H5c-.6 0-1-.4-1-1s.4-1 1-1h13v2z" />
+            </svg>
+          </div>
+          <div className="flex items-center gap-2.5 text-xs font-semibold text-[#8C827A]">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#E85D43] opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-[#E85D43]"></span>
+            </span>
+            <span>Checking authentication...</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 2. Unauthenticated: Render the clean split-screen LoginPage with Google OAuth
+  if (!session) {
+    return (
+      <LoginPage 
+        onLoginSuccess={(newSession, newUser) => {
+          if (newSession) {
+            setSession(newSession);
+            setUser(newUser || newSession.user || null);
+            setAuthLoading(false);
+          }
+        }} 
+      />
+    );
+  }
+
+  // 3. Authenticated: Render the full existing NotiBook Application & Dashboard
   return (
     <div className="min-h-screen bg-[#FAF7F2] text-[#1E232A] flex">
       {/* Mobile Backdrop */}
@@ -990,6 +1396,8 @@ export default function App() {
           settings={settings}
           collapsed={collapsedSidebar}
           setCollapsed={setCollapsedSidebar}
+          onLogout={handleLogout}
+          user={user}
         />
       </div>
 
@@ -1064,11 +1472,28 @@ export default function App() {
               onOpenAddProduct={() => setIsAddProductOpen(true)}
               onUpdateStockQty={handleUpdateStockQty}
               onDeleteProduct={handleDeleteProduct}
-              onImportSampleProducts={handleImportSampleProducts}
+              onImportSampleProducts={() => setIsPdfImportOpen(true)}
               isPopulatedState={isPopulatedState}
               onTogglePopulatedState={handleTogglePopulatedState}
               onExportBook={handleExportBook}
               onDeleteTransaction={handleDeleteTransaction}
+              onOpenPdfImport={() => setIsPdfImportOpen(true)}
+              onOpenStockHistory={(prodId) => {
+                setHistoryProductId(prodId);
+                setIsStockHistoryOpen(true);
+              }}
+              onOpenStockAdjust={(prod) => {
+                setAdjustTargetProduct(prod || null);
+                setIsStockAdjustOpen(true);
+              }}
+              onEditProduct={(prod) => {
+                setEditTargetProduct(prod);
+                setIsEditProductOpen(true);
+              }}
+              onOpenSalesReturn={(inv) => {
+                setReturnTargetInvoice(inv);
+                setIsSalesReturnOpen(true);
+              }}
             />
           )}
         </main>
@@ -1129,6 +1554,59 @@ export default function App() {
         invoice={viewingInvoice}
         onClose={() => setViewingInvoice(null)}
         settings={settings}
+        onOpenReturn={(inv) => {
+          setReturnTargetInvoice(inv);
+          setIsSalesReturnOpen(true);
+        }}
+      />
+
+      <PdfCatalogueImportModal
+        isOpen={isPdfImportOpen}
+        onClose={() => setIsPdfImportOpen(false)}
+        existingProducts={products}
+        onImportSuccess={handlePdfImportSuccess}
+      />
+
+      <StockHistoryModal
+        isOpen={isStockHistoryOpen}
+        onClose={() => {
+          setIsStockHistoryOpen(false);
+          setHistoryProductId(undefined);
+        }}
+        movements={stockMovements}
+        products={products}
+        selectedProductId={historyProductId}
+      />
+
+      <StockAdjustModal
+        isOpen={isStockAdjustOpen}
+        onClose={() => {
+          setIsStockAdjustOpen(false);
+          setAdjustTargetProduct(null);
+        }}
+        products={products}
+        selectedProduct={adjustTargetProduct}
+        onConfirmAdjust={handleManualStockAdjust}
+      />
+
+      <EditProductModal
+        isOpen={isEditProductOpen}
+        onClose={() => {
+          setIsEditProductOpen(false);
+          setEditTargetProduct(null);
+        }}
+        product={editTargetProduct}
+        onSaveProduct={handleSaveProductEdit}
+      />
+
+      <SalesReturnModal
+        isOpen={isSalesReturnOpen}
+        onClose={() => {
+          setIsSalesReturnOpen(false);
+          setReturnTargetInvoice(null);
+        }}
+        invoice={returnTargetInvoice}
+        onConfirmReturn={handleSalesReturn}
       />
 
       <SettingsModal
@@ -1140,6 +1618,8 @@ export default function App() {
         onExportData={handleExportBook}
         isPopulatedState={isPopulatedState}
         onTogglePopulatedState={handleTogglePopulatedState}
+        onLogout={handleLogout}
+        user={user}
       />
 
       <SearchModal
